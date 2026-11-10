@@ -1,0 +1,9 @@
+# Measurement output, not source
+*-ledger.log
+
+# Python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
