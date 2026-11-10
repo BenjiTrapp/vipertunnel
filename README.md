@@ -397,6 +397,36 @@ timestamps. A field named for a sleep interval or a jitter does not reliably
 hold one: a "jitter" can turn out to be the largest gap between contacts, and
 an "average sleep" a span divided by a count. A ledger is how you notice.
 
+### When a proxy ends the tunnel, and how long it lived
+
+A CONNECT proxy may end a tunnel after a fixed time, however busy or quiet it
+is. When it does, the client reads an error or a zero-byte close, treats it
+as the server hanging up, and exits -- the original behaves the same way, and
+that is reproduced rather than fixed. Nothing starts it again.
+
+`client/supervise.py` is that missing outside trigger. It sits outside the
+client on purpose: the original relies on something external to start it
+rather than on reconnect logic of its own, and keeping the client untouched
+keeps it faithful.
+
+```
+./client/supervise.py --ledger client/client-ledger.log -- \
+    c2.example.com:443 --proxy 127.0.0.1:3128 --ledger client/client-ledger.log
+```
+
+Everything after `--` is the client's own argument list. Pointing both
+`--ledger` options at one file puts the client's events and the supervisor's
+in a single timeline.
+
+Each exit is recorded as `child-exit` with `lifetime_seconds`, the time the
+previous run lived. **That is the measurement:** a proxy with a fixed limit
+produces the same lifetime on every restart, give or take the seconds it
+takes to be noticed, and a run that dies at scattered ages was not ended by
+a timer. A run that lived a minute or more is restarted at once. A shorter
+one is treated as a fault and waited out (`supervisor-backoff`, doubling from
+one minute to ten); five in a row end the supervisor with
+`supervisor-gave-up` rather than hammer a proxy that is refusing.
+
 ## Running it
 
 Two terminals.

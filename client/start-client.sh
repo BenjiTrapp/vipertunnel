@@ -15,6 +15,9 @@
 # The bytes between this process and the server are unchanged by the proxy
 # leg -- it is transport only, which is what keeps this faithful where the
 # measurement cares.
+#
+# To restart the client when a proxy ends the tunnel, and to record how long
+# each run lived, run it under supervise.py instead; see the README.
 
 set -euo pipefail
 
