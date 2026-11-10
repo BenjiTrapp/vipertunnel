@@ -86,11 +86,11 @@ a detection that reads proxy logs sees nothing at all from a host with direct
 egress. The proxy leg is transport only — the bytes inside the tunnel are
 unchanged, which is what keeps this faithful where the measurement cares.
 
-In the CSIRT lab the right target is the local NTLM relay, not the corporate
-proxy directly:
+Where a host reaches an authenticating corporate proxy through a local relay,
+that relay is the address to give rather than the proxy itself:
 
 ```
-PROXY=127.0.0.1:3128 ./client/start-client.sh 10.104.20.134
+PROXY=127.0.0.1:3128 ./client/start-client.sh c2.example.com
 ```
 
 ### What to expect of a periodicity detection
@@ -100,10 +100,10 @@ result and not a failed experiment:
 
 - With a keep-alive **under** 120 s there is one long-lived CONNECT and no
   periodicity. A detection that bins per-connection events has nothing to
-  work with. The same measurement next door established that one agent held
-  a single connection for 2833 seconds across ~280 check-ins while another
-  opened 31 connections a minute at the same cadence — this is the extreme
-  end of that spectrum.
+  work with. This is the far end of a spectrum worth knowing about: at the
+  same nominal check-in rate, an agent that pools one socket produces a
+  single long session while one that opens a connection per message produces
+  thousands of short ones — and this tunnel is the extreme of the first kind.
 - With a keep-alive of **0** there is a reconnect every ~120 s with
   near-zero jitter. That is about as easy a target as a periodicity
   detection ever gets, and if it does not fire the finding is about the
@@ -124,10 +124,9 @@ client/client-ledger.log
 ```
 
 Compare a detection's report against **those**, not against its own
-timestamps. In this lab, fields in these alerts have been found to mean
-something other than their names — a field called `jitter` that was the
-largest gap between contacts, an `avg_sleep` that was a span divided by a
-count. A ledger is how you notice.
+timestamps. A field named for a sleep interval or a jitter does not reliably
+hold one: a "jitter" can turn out to be the largest gap between contacts, and
+an "average sleep" a span divided by a count. A ledger is how you notice.
 
 ## Running it
 

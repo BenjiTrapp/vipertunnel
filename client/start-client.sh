@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 #
-# Start the implant for a Beacon Reaper measurement.
+# Start the implant for a traffic measurement.
 #
 # PROXY is not optional for this measurement, even though it is a deviation
-# from the family: the Reaper reads proxy logs, so a host with direct egress
-# produces nothing for it to see. Point this at whatever CONNECT proxy the
-# victim would really use.
+# from the family: a detection that reads proxy logs sees nothing at all from
+# a host with direct egress. Point this at whatever CONNECT proxy the host
+# would really use.
 #
-# In the CSIRT lab that is the local NTLM relay rather than the corporate
-# proxy directly:
+# Where a host reaches its proxy through a local relay -- an authenticating
+# corporate proxy usually needs one -- that relay is the address to give:
 #
-#   PROXY=127.0.0.1:3128 ./start-client.sh 10.104.20.134
+#   PROXY=127.0.0.1:3128 ./start-client.sh c2.example.com
 #
 # The bytes between this process and the server are unchanged by the proxy
 # leg -- it is transport only, which is what keeps this faithful where the

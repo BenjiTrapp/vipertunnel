@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 #
-# Start the tunnel server for a Beacon Reaper measurement.
+# Start the tunnel server for a traffic measurement.
 #
 # The one thing to decide before you run this is KEEPALIVE, because its
 # effect is a step rather than a slope:
 #
-#   KEEPALIVE=60   -> one held TCP connection. The proxy logs a single
-#                     CONNECT and a byte count. There is no cadence for a
+#   KEEPALIVE=60   -> one held TCP connection. A proxy logs a single CONNECT
+#                     and a byte count. There is no cadence for a
 #                     periodicity detection to find, and that is a result
 #                     worth having rather than a failed run.
 #   KEEPALIVE=0    -> never send one. The client's 120-second read deadline
 #                     expires, it tears the connection down and builds a new
-#                     one, and the proxy log shows a reconnect every ~120s.
-#                     This is the shape the Reaper hunts.
+#                     one, and a proxy log shows a reconnect every ~120s.
+#                     This is the shape a periodicity detection hunts.
 #
 # There is no third option from this side: if this server closes a command
 # connection, the original client exits rather than reconnecting. A cadence
@@ -44,7 +44,7 @@ if [ "$PORT" -lt 1024 ] && [ "$(id -u)" -ne 0 ]; then
 fi
 
 case "$KEEPALIVE" in
-    0) SHAPE="a reconnect every ~120s -- the cadence the Reaper hunts" ;;
+    0) SHAPE="a reconnect every ~120s -- a cadence a detection can find" ;;
     *) if [ "${KEEPALIVE%.*}" -lt 120 ] 2>/dev/null; then
            SHAPE="one held connection -- no cadence to find"
        else
@@ -60,9 +60,9 @@ tunnel server
   expect     ${SHAPE}
   ledger     ${LEDGER}
 
-Ground truth goes to the ledger. Compare the Reaper's report against it
-rather than against the Reaper's own timestamps -- the fields in these
-alerts have been found to mean something other than their names.
+Ground truth goes to the ledger. Compare a detection's report against it
+rather than against the detection's own timestamps -- a field named for a
+sleep interval or a jitter does not always hold one.
 BANNER
 
 exec "$PYTHON" "$HERE/server.py" \
