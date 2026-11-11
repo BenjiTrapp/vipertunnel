@@ -1,4 +1,6 @@
-# vipertunnel
+<p align="center">
+  <img src="file_000000007a008210b0af54399e8d873d.gif" alt="Logo">
+</p>
 
 **A reverse SOCKS5 tunnel, reimplemented faithfully on the wire and
 deliberately nowhere else — so that a network-side detection can be measured
