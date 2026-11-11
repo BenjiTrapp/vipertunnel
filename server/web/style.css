@@ -180,6 +180,9 @@ code { color: var(--accent); }
   padding: 14px 16px 16px;
   margin-bottom: 18px;
   box-shadow: var(--shadow);
+  /* Without this the feed's nowrap lines widen the grid column and squeeze
+   * the panel beside it. */
+  min-width: 0;
 }
 .panel-head {
   display: flex;
@@ -299,18 +302,19 @@ code { color: var(--accent); }
 }
 .tabs button.on { color: var(--accent); border-bottom-color: var(--accent); }
 
-.feed { list-style: none; margin: 0; padding: 0; max-height: 420px; overflow-y: auto; }
+.feed { list-style: none; margin: 0; padding: 0; max-height: 420px; overflow-y: auto; overflow-x: hidden; }
 .feed li {
   display: flex;
   gap: 10px;
   padding: 3px 0;
   border-bottom: 1px solid var(--line);
   white-space: nowrap;
+  min-width: 0;
 }
 .feed li:last-child { border-bottom: 0; }
 .feed time { color: var(--ink-faint); }
 .feed .ev { min-width: 20ch; }
-.feed .fields { color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; }
+.feed .fields { color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .feed .e-arrive .ev { color: var(--accent); }
 .feed .e-leave .ev { color: var(--red); }
 .feed .e-keepalive .ev { color: var(--amber); }
