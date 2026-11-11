@@ -56,6 +56,8 @@
       <span><i class="sw" style="background:var(--warn)"></i>keep-alive</span>
       <span><i class="sw" style="background:var(--tx)"></i>relay session</span>
       <span><i class="sw" style="background:var(--dead)"></i>channel died</span>
+      <span><i class="sw" style="background:var(--tx);opacity:.45"></i>volume</span>
+      <span><i class="sw" style="background:var(--acid)"></i>detection</span>
     </div>
     <div class="zoom" id="zoom">
       <button data-span="0" class="on">fit</button>
@@ -96,10 +98,7 @@
     <p class="empty" id="fleet-empty">No implant has a command connection open.</p>
 
     <div class="panel-head sub"><h2>relay sessions</h2><span class="count" id="session-count">0</span></div>
-    <table class="grid-t" id="sessions">
-      <thead><tr><th>target</th><th>relay</th><th>via</th><th>age</th></tr></thead>
-      <tbody></tbody>
-    </table>
+    <div id="sessions"></div>
     <p class="empty" id="session-empty">
       No relay is carrying traffic. Drive one with <code>curl --socks5</code>
       on the operator port, or probe it here.
@@ -162,6 +161,53 @@
       <thead><tr><th>trait</th><th>the real thing</th><th>here</th></tr></thead>
       <tbody></tbody>
     </table>
+  </section>
+</div>
+
+<!-- Purple: the parts an exercise needs that a run does not. -->
+<div class="two">
+  <section class="panel a">
+    <div class="panel-head">
+      <h2>phase</h2>
+      <span class="count" id="phase-now">none</span>
+      <a id="debrief" class="ghost" href="/api/debrief">debrief .md</a>
+    </div>
+    <p class="d">Name the stretch you are running. Without boundaries an
+      alert's timestamp has nothing to be measured against — "the rule fired
+      at 14:12" and nobody can say what was running at 14:12. Each boundary
+      is a ledger line.</p>
+    <form id="phase">
+      <input name="name" placeholder="e.g. phase 2 — cadence shape" required>
+      <button type="submit">start</button>
+    </form>
+    <button id="phase-stop" class="ghost" style="margin-top:8px">end the current phase</button>
+    <table class="grid-t hidden" id="phases">
+      <thead><tr><th>phase</th><th>keep-alive</th><th>ran</th><th>detections</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="panel m">
+    <div class="panel-head">
+      <h2>ingest · detections on the same axis</h2>
+      <span class="count" id="mark-count">0</span>
+    </div>
+    <p class="d">One endpoint, any source. Point your SIEM's webhook at
+      <code>POST /api/ingest</code> with
+      <code>{"source","label","severity","at"}</code> and its alerts appear
+      beside what actually happened — the offset to the phase start is the
+      time to detect, measured rather than estimated. This is the extension
+      point: new things need no code here, only something that can POST.</p>
+    <form id="ingest">
+      <input name="source" placeholder="source, e.g. splunk" required>
+      <input name="label" placeholder="what fired" required>
+      <button type="submit">add</button>
+    </form>
+    <ol class="feed" id="marks" style="max-height:200px"></ol>
+    <p class="empty" id="marks-empty">
+      Nothing ingested. A phase with no detections is a result — the debrief
+      records it as "nothing fired" rather than as a gap.
+    </p>
   </section>
 </div>
 

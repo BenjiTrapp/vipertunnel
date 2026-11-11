@@ -100,6 +100,15 @@ _RFC_CMD_UNSUPPORTED = 7
 _RELAY_CHUNK = 16384
 _PAIR_TIMEOUT = 30.0
 
+# How much of each direction is kept for the protocol summary. Enough for an
+# HTTP request line with headers or a TLS ClientHello, and far too little to
+# be a capture of anybody's traffic.
+_SNIFF = 512
+
+# Per-second volume buckets kept per host, so a closed session still has a
+# shape on the timeline.
+_VOLUME_SECONDS = 3600
+
 # The client's read deadline, which this server does not set and cannot
 # change. It is here because it is the threshold the keep-alive knob is
 # measured against: below it one connection is held, above it the client
@@ -197,18 +206,171 @@ def _recv_exactly(sock, count):
     return b"".join(chunks)
 
 
-def _bridge(first, second):
-    socks = [first, second]
+def _summarise(outbound, inbound):
+    """Name the protocol from the first bytes of each direction.
+
+    What a Zeek-style analyser would extract, and nothing more. The blue
+    team's question about a tunnel is "what did they touch", and that is
+    answerable from a request line or an SNI without keeping anybody's
+    traffic. Every answer is hedged, because first bytes are a suggestion
+    and not a proof.
+    """
+    head = bytes(outbound[:_SNIFF])
+    back = bytes(inbound[:_SNIFF])
+
+    if back[:4] == b"SSH-":
+        banner = back.split(b"\r", 1)[0].split(b"\n", 1)[0]
+        return "SSH -- server banner %s" % banner.decode("latin-1", "replace")
+
+    first_line = head.split(b"\r\n", 1)[0]
+    if b" HTTP/1." in first_line:
+        request = first_line.decode("latin-1", "replace")[:120]
+        host = ""
+        for line in head.split(b"\r\n")[1:]:
+            if line[:5].lower() == b"host:":
+                host = " (Host: %s)" % line[5:].strip().decode(
+                    "latin-1", "replace")[:80]
+                break
+        return "HTTP -- %s%s" % (request, host)
+
+    if head[:1] == b"\x16" and head[1:2] == b"\x03":
+        name = _client_hello_sni(head)
+        return "TLS ClientHello%s" % (" -- SNI %s" % name if name else "")
+
+    # NetBIOS length prefix, then the SMB magic.
+    if head[:1] == b"\x00" and head[4:8] in (b"\xffSMB", b"\xfeSMB"):
+        return "SMB%s -- negotiate" % ("2" if head[4:5] == b"\xfe" else "1")
+
+    if head[:2] == b"\x03\x00":
+        return "TPKT/X.224 -- looks like RDP"
+
+    if not head and not back:
+        return "nothing crossed"
+    return "unrecognised -- %d B out, %d B back before this was decided" % (
+        len(outbound), len(inbound))
+
+
+def _client_hello_sni(data):
+    """Pull the server name out of a TLS ClientHello, or give up quietly.
+
+    Hand-rolled because the standard library will not parse a handshake it
+    did not make. Defensive throughout: a malformed or truncated hello must
+    return nothing rather than raise into a relay thread.
+    """
+    try:
+        if len(data) < 45:
+            return None
+        at = 43                                  # past record + handshake
+        at += 1 + data[at]                       # session id
+        if at + 2 > len(data):
+            return None
+        at += 2 + int.from_bytes(data[at:at + 2], "big")      # cipher suites
+        if at >= len(data):
+            return None
+        at += 1 + data[at]                                    # compression
+        if at + 2 > len(data):
+            return None
+        end = at + 2 + int.from_bytes(data[at:at + 2], "big")
+        at += 2
+        while at + 4 <= min(end, len(data)):
+            kind = int.from_bytes(data[at:at + 2], "big")
+            size = int.from_bytes(data[at + 2:at + 4], "big")
+            body = data[at + 4:at + 4 + size]
+            at += 4 + size
+            if kind != 0 or len(body) < 5:        # 0 is server_name
+                continue
+            return body[5:5 + int.from_bytes(body[3:5], "big")].decode(
+                "idna", "replace")[:100]
+    except (IndexError, ValueError, UnicodeError):
+        return None
+    return None
+
+
+class StreamMeter(object):
+    """Volume, rate and a protocol summary for one relay session.
+
+    The relays are the part of this traffic that carries volume, and until
+    now the only visible fact about them was that they existed. This counts
+    bytes per second in each direction and keeps the first few hundred bytes
+    long enough to name the protocol.
+
+    **It is not a capture.** The sniff buffer is bounded at %d bytes per
+    direction and is discarded once the summary is made; the payload itself
+    is never stored, never written to the ledger and never sent to the
+    browser. That traffic belongs to the network under test.
+    """ % _SNIFF
+
+    def __init__(self):
+        self.out_bytes = 0
+        self.in_bytes = 0
+        self.buckets = {}                  # epoch second -> [out, in]
+        self._out_head = bytearray()
+        self._in_head = bytearray()
+        self._summary = None
+        self._lock = threading.Lock()
+
+    def _bucket(self, index, count):
+        second = int(time.time())
+        with self._lock:
+            slot = self.buckets.setdefault(second, [0, 0])
+            slot[index] += count
+            if len(self.buckets) > _VOLUME_SECONDS:
+                for stale in sorted(self.buckets)[:-_VOLUME_SECONDS]:
+                    del self.buckets[stale]
+
+    def to_target(self, chunk):
+        self.out_bytes += len(chunk)
+        if len(self._out_head) < _SNIFF:
+            self._out_head += chunk[:_SNIFF - len(self._out_head)]
+        self._bucket(0, len(chunk))
+
+    def from_target(self, chunk):
+        self.in_bytes += len(chunk)
+        if len(self._in_head) < _SNIFF:
+            self._in_head += chunk[:_SNIFF - len(self._in_head)]
+        self._bucket(1, len(chunk))
+
+    @property
+    def summary(self):
+        """Name the protocol once, then drop the bytes it was named from."""
+        if self._summary is None and (self._out_head or self._in_head):
+            self._summary = _summarise(self._out_head, self._in_head)
+            if len(self._out_head) >= _SNIFF or self._in_head:
+                self._out_head = bytearray()
+                self._in_head = bytearray()
+        return self._summary or "nothing crossed yet"
+
+    def series(self, since):
+        with self._lock:
+            return {second: list(slot)
+                    for second, slot in self.buckets.items()
+                    if second >= since}
+
+
+def _bridge(operator, relay, meter=None):
+    """Move bytes between the operator and the implant until one side stops.
+
+    `operator` is the RFC 1928 side and `relay` is the implant's, so a chunk
+    read from the operator is heading for the target and one read from the
+    relay is coming back from it. The meter needs that distinction; the
+    bridge itself does not care.
+    """
+    socks = [operator, relay]
     while True:
         ready, _, _ = select.select(socks, [], socks, 1.0)
         for sock in ready:
-            other = second if sock is first else first
+            other = relay if sock is operator else operator
             try:
                 chunk = sock.recv(_RELAY_CHUNK)
             except OSError:
                 return
             if not chunk:
                 return
+            if meter is not None:
+                if sock is operator:
+                    meter.to_target(chunk)
+                else:
+                    meter.from_target(chunk)
             try:
                 other.sendall(chunk)
             except OSError:
@@ -419,6 +581,10 @@ class SessionBook(object):
     def __init__(self):
         self._open = {}
         self._lock = threading.Lock()
+        # Closed sessions leave their per-second volume behind, keyed by
+        # implant host, so a session that ended five minutes ago still has a
+        # shape on the timeline rather than vanishing from it.
+        self._archive = {}
 
     def open(self, client, host, port, relay_port):
         entry = {
@@ -430,6 +596,7 @@ class SessionBook(object):
             "relay_port": relay_port,
             "opened": time.time(),
             "started": time.monotonic(),
+            "meter": StreamMeter(),
         }
         with self._lock:
             self._open[entry["id"]] = entry
@@ -438,20 +605,68 @@ class SessionBook(object):
     def close(self, entry):
         with self._lock:
             self._open.pop(entry["id"], None)
+            implant = entry["peer"].rsplit(":", 1)[0]
+            archive = self._archive.setdefault(implant, {})
+            for second, slot in entry["meter"].buckets.items():
+                kept = archive.setdefault(second, [0, 0])
+                kept[0] += slot[0]
+                kept[1] += slot[1]
+            if len(archive) > _VOLUME_SECONDS:
+                for stale in sorted(archive)[:-_VOLUME_SECONDS]:
+                    del archive[stale]
 
     def snapshot(self):
         now = time.monotonic()
         with self._lock:
             entries = list(self._open.values())
-        return [{
-            "id": e["id"],
-            "client_id": e["client_id"],
-            "peer": e["peer"],
-            "target": "%s:%d" % (e["host"], e["port"]),
-            "relay_port": e["relay_port"],
-            "opened": e["opened"],
-            "age_seconds": int(now - e["started"]),
-        } for e in sorted(entries, key=lambda e: e["id"])]
+        out = []
+        for entry in sorted(entries, key=lambda e: e["id"]):
+            meter = entry["meter"]
+            age = max(1, int(now - entry["started"]))
+            out.append({
+                "id": entry["id"],
+                "client_id": entry["client_id"],
+                "peer": entry["peer"],
+                "target": "%s:%d" % (entry["host"], entry["port"]),
+                "relay_port": entry["relay_port"],
+                "opened": entry["opened"],
+                "age_seconds": int(now - entry["started"]),
+                "out_bytes": meter.out_bytes,
+                "in_bytes": meter.in_bytes,
+                "rate": int((meter.out_bytes + meter.in_bytes) / age),
+                "summary": meter.summary,
+                "recent": _as_series(meter.series(int(time.time()) - 60)),
+            })
+        return out
+
+    def volume(self, since):
+        """Per-second volume per implant host, live sessions and closed."""
+        merged = {}
+        with self._lock:
+            for implant, archive in self._archive.items():
+                target = merged.setdefault(implant, {})
+                for second, slot in archive.items():
+                    if second < since:
+                        continue
+                    kept = target.setdefault(second, [0, 0])
+                    kept[0] += slot[0]
+                    kept[1] += slot[1]
+            entries = list(self._open.values())
+        for entry in entries:
+            implant = entry["peer"].rsplit(":", 1)[0]
+            target = merged.setdefault(implant, {})
+            for second, slot in entry["meter"].series(since).items():
+                kept = target.setdefault(second, [0, 0])
+                kept[0] += slot[0]
+                kept[1] += slot[1]
+        return {implant: _as_series(buckets)
+                for implant, buckets in merged.items()}
+
+
+def _as_series(buckets):
+    """Sparse `[second, out, in]` triples -- only the seconds with traffic."""
+    return [[second, slot[0], slot[1]]
+            for second, slot in sorted(buckets.items())]
 
 
 class RelayBroker(object):
@@ -486,6 +701,60 @@ class RelayBroker(object):
             return sock, port
         finally:
             listener.close()
+
+
+class Phases(object):
+    """Named spans of a run, for an exercise both teams are watching.
+
+    A measurement is usually two or three deliberate stretches -- "held
+    connection", then "cadence", then "traffic through it" -- and the
+    boundaries are the only thing that makes an alert's timestamp mean
+    anything. Without them a report says "the rule fired at 14:12" and
+    nobody can say what was running at 14:12.
+
+    Each boundary is a ledger line, so the phases survive in the artefact a
+    finding cites rather than only in a browser tab.
+    """
+
+    _ids = itertools.count(1)
+
+    def __init__(self, ledger):
+        self._ledger = ledger
+        self._phases = []
+        self._lock = threading.Lock()
+
+    def start(self, name, knob=None):
+        name = str(name)[:120].strip() or "unnamed"
+        self.stop()
+        phase = {"id": next(Phases._ids), "name": name,
+                 "started": time.time(), "ended": None,
+                 "keepalive": knob.seconds if knob else None}
+        with self._lock:
+            self._phases.append(phase)
+        self._ledger.record("phase-start", name=name.replace(" ", "_"),
+                            keepalive=phase["keepalive"])
+        return phase
+
+    def stop(self):
+        with self._lock:
+            open_phase = next((p for p in reversed(self._phases)
+                               if p["ended"] is None), None)
+            if open_phase is None:
+                return None
+            open_phase["ended"] = time.time()
+        self._ledger.record(
+            "phase-end", name=open_phase["name"].replace(" ", "_"),
+            held_seconds=int(open_phase["ended"] - open_phase["started"]))
+        return open_phase
+
+    def current(self):
+        with self._lock:
+            return next((dict(p) for p in reversed(self._phases)
+                         if p["ended"] is None), None)
+
+    def snapshot(self):
+        with self._lock:
+            return [dict(p) for p in self._phases]
 
 
 class LabGuard(object):
@@ -614,10 +883,17 @@ class OperatorHandler(socketserver.BaseRequestHandler):
                       peer=client.peer)
         self._reply(operator, _RFC_OK, bound[0], bound[1])
         try:
-            _bridge(operator, relay)
+            _bridge(operator, relay, entry["meter"])
         finally:
+            meter = entry["meter"]
             self.server.sessions.close(entry)
-            ledger.record("session-close", host=host, port=port)
+            # The volume and the protocol belong in the ledger: they are the
+            # facts a volume-based detection would have had, and the file is
+            # what a finding cites. The payload itself is never recorded.
+            ledger.record("session-close", host=host, port=port,
+                          out_bytes=meter.out_bytes,
+                          in_bytes=meter.in_bytes,
+                          saw=meter.summary.replace(" ", "_"))
             relay.close()
 
     # -- the operator's side, which is the RFC --------------------------------
@@ -936,6 +1212,7 @@ def main(argv=None):
     sessions = SessionBook()
     wire = WireLog()
     guard = LabGuard(args.allow_public)
+    phases = Phases(ledger)
     broker = RelayBroker(args.bind, ledger)
     stop = threading.Event()
 
@@ -977,7 +1254,8 @@ def main(argv=None):
         board = _dashboard_class()(
             ("127.0.0.1", args.dashboard), fleet, sessions, knob, ledger,
             socks_port=args.socks, command_port=args.port,
-            socks_credentials=credentials, wire=wire, guard=guard)
+            socks_credentials=credentials, wire=wire, guard=guard,
+            phases=phases)
         threads.append(threading.Thread(target=board.serve_forever,
                                         name="dashboard", daemon=True))
         LOG.info("dashboard on http://127.0.0.1:%d -- out of band, and a "

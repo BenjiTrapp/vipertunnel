@@ -22,6 +22,9 @@ to know before turning it on:
 
 ## What it can change
 
+Each of these changes the run being measured, so each is in the ledger with
+`by=dashboard`.
+
   * **The keep-alive knob**, live. The step from "one held connection" to "a
     reconnect every ~120 s" is the experiment, and turning it mid-run puts
     both shapes in one timeline with one client and one ledger.
@@ -34,6 +37,19 @@ to know before turning it on:
     about the wire changes; this only saves a second terminal.
   * **Leave a note in the ledger.** The marker an analyst wants when a
     detection fires: a dated line in the same file as the ground truth.
+  * **Name a phase.** A measurement is two or three deliberate stretches, and
+    the boundaries are the only thing that makes an alert's timestamp mean
+    anything.
+
+## What it takes in
+
+`POST /api/ingest` accepts a detection from anywhere -- a SIEM webhook, an
+EDR, a Zeek notice, a colleague -- and puts it on the same axis as the
+truth, where the offset from the phase start is the time to detect. One
+generic endpoint rather than an integration per tool, which is also the
+extension point: new things need no code here, only something that can POST.
+
+`GET /api/debrief` returns the whole run as one markdown file.
 """
 
 import json
@@ -175,6 +191,58 @@ def cadence(arrivals, now=None):
     return out
 
 
+class Marks(object):
+    """Events from outside this program, on the same axis as the truth.
+
+    One generic endpoint rather than an integration per tool: anything that
+    can POST becomes a lane on the ground-truth timeline. A SIEM webhook
+    posting its alerts is the case this was built for -- the offset between
+    an alert and the phase it belongs to is the time-to-detect, measured
+    instead of estimated -- but an EDR, a Zeek notice or a colleague's
+    annotation all land the same way.
+
+    This is also the extension point. New things need no code here, only
+    somebody who can POST.
+    """
+
+    _SOURCES = 24          # distinct lanes worth drawing
+    _LIMIT = 2000
+
+    def __init__(self, ledger):
+        self._ledger = ledger
+        self._marks = []
+        self._lock = threading.Lock()
+        self._next_id = 1
+
+    def add(self, source, label, at=None, severity="info"):
+        source = str(source)[:60].strip() or "unknown"
+        label = str(label)[:300].strip() or "(no label)"
+        severity = str(severity)[:20].strip().lower() or "info"
+        when = float(at) if at else time.time()
+        with self._lock:
+            if len({m["source"] for m in self._marks} | {source}) > self._SOURCES:
+                raise ValueError("too many distinct sources (%d); post under "
+                                 "a name already in use" % self._SOURCES)
+            mark = {"id": self._next_id, "source": source, "label": label,
+                    "at": when, "severity": severity}
+            self._next_id += 1
+            self._marks.append(mark)
+            if len(self._marks) > self._LIMIT:
+                del self._marks[:len(self._marks) - self._LIMIT]
+        self._ledger.record("ingested", source=source.replace(" ", "_"),
+                            severity=severity,
+                            label=label.replace(" ", "_")[:120])
+        return mark
+
+    def snapshot(self):
+        with self._lock:
+            return list(self._marks)
+
+    def sources(self):
+        with self._lock:
+            return sorted({mark["source"] for mark in self._marks})
+
+
 class Dashboard(ThreadingHTTPServer):
     """The HTTP side. Loopback only; see the module docstring for why."""
 
@@ -183,7 +251,7 @@ class Dashboard(ThreadingHTTPServer):
 
     def __init__(self, address, fleet, sessions, knob, ledger,
                  socks_port, command_port, socks_credentials=None,
-                 wire=None, guard=None):
+                 wire=None, guard=None, phases=None):
         self.fleet = fleet
         self.sessions = sessions
         self.knob = knob
@@ -193,6 +261,8 @@ class Dashboard(ThreadingHTTPServer):
         self.socks_credentials = socks_credentials
         self.wire = wire
         self.guard = guard
+        self.phases = phases
+        self.marks = Marks(ledger)
         self.started = time.time()
         self.events = EventLog()
         self.relay_ports = []
@@ -275,6 +345,9 @@ class Dashboard(ThreadingHTTPServer):
             "sessions": self.sessions.snapshot(),
             "cadence": self.cadences(),
             "totals": self.totals(),
+            "phases": self.phases.snapshot() if self.phases else [],
+            "marks": self.marks.snapshot()[-400:],
+            "volume": self.sessions.volume(int(time.time()) - 900),
         }
 
     # -- doing --------------------------------------------------------------
@@ -517,6 +590,248 @@ class Dashboard(ThreadingHTTPServer):
                 pass
 
 
+    def debrief(self):
+        """A one-file account of the run, for the debrief both teams attend.
+
+        Assembled only from what the ledger already holds, so nothing here
+        is a second version of the truth. The number it exists to produce is
+        the offset between each ingested alert and the phase it landed in --
+        the time-to-detect, measured rather than estimated, and an explicit
+        "nothing fired" for a phase where nothing did.
+        """
+        now = time.time()
+        phases = self.phases.snapshot() if self.phases else []
+        marks = self.marks.snapshot()
+        lines = []
+        add = lines.append
+
+        add("# vipertunnel -- run debrief")
+        add("")
+        add("Generated %s. Every figure below is derived from the ledger "
+            "file, which stays the artefact to cite."
+            % time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)))
+        add("")
+        add("| | |")
+        add("|---|---|")
+        add("| command port | %d |" % self.command_port)
+        add("| operator port | 127.0.0.1:%d |" % self.socks_port)
+        add("| relaying | %s |" % ("the private ranges, loopback and "
+                                   "link-local only"
+                                   if self.guard and not self.guard.allow_public
+                                   else "anywhere (--allow-public)"))
+        add("| server up | %s |" % _duration(now - self.started))
+        totals = self.totals()
+        add("| command connections | %d |" % totals["connections"])
+        add("| keep-alives sent | %d |" % totals["keepalives"])
+        add("| relay sessions | %d |" % totals["sessions"])
+        add("")
+
+        add("## Cadence, per implant host")
+        add("")
+        add("The arithmetic a beaconing detection runs. A coefficient of "
+            "variation near zero is a machine on a timer.")
+        add("")
+        add("| host | connections | mean gap | stdev | CV | verdict |")
+        add("|---|---|---|---|---|---|")
+        for entry in self.cadences():
+            add("| %s | %d | %s | %s | %s | %s |" % (
+                entry["host"], entry["connections"],
+                _or_dash(entry["mean"], " s"), _or_dash(entry["stdev"], " s"),
+                _or_dash(entry["cv"]), entry["verdict"]))
+        if not self.cadences():
+            add("| — | 0 | | | | nothing connected |")
+        add("")
+
+        add("## Phases, and what was detected in each")
+        add("")
+        if not phases:
+            add("No phases were declared. An alert's timestamp then has "
+                "nothing to be measured against, which is the one thing "
+                "worth fixing before the next run.")
+        for phase in phases:
+            ended = phase["ended"] or now
+            add("### %s" % phase["name"])
+            add("")
+            add("%s → %s (%s), keep-alive %s" % (
+                _stamp(phase["started"]),
+                _stamp(phase["ended"]) if phase["ended"] else "still running",
+                _duration(ended - phase["started"]),
+                "%gs" % phase["keepalive"] if phase["keepalive"] is not None
+                else "unknown"))
+            add("")
+            # A running phase has no end yet, so its window stays open. That
+            # is not pedantry: a detection platform whose clock runs a few
+            # seconds ahead would otherwise have its alerts silently dropped
+            # out of the phase they belong to.
+            horizon = phase["ended"] if phase["ended"] else float("inf")
+            during = [m for m in marks
+                      if phase["started"] <= m["at"] <= horizon]
+
+            # The knob recorded on the phase is the value at its start, and
+            # the whole point of the knob is that it can be turned mid-run.
+            # A debrief that reported only the opening value would describe
+            # a phase that may never have existed.
+            turns = [e for e in self.events.history()
+                     if e["event"] == "knob-turned"
+                     and phase["started"] <= e["at"] <= min(
+                         horizon, now)]
+            settings = [phase["keepalive"]]
+            if turns:
+                add("Keep-alive was turned inside this phase: %s."
+                    % ", ".join("%ss after %s" % (e["fields"].get("keepalive"),
+                                                  _duration(e["at"] - phase["started"]))
+                                for e in turns))
+                add("")
+                settings += [_as_float(e["fields"].get("keepalive"))
+                             for e in turns]
+
+            if not during:
+                add("**Nothing fired.** %s" % _silence(settings))
+                add("")
+                continue
+            add("| source | after phase start | severity | label |")
+            add("|---|---|---|---|")
+            for mark in during:
+                add("| %s | %s | %s | %s |" % (
+                    mark["source"], _duration(mark["at"] - phase["started"]),
+                    mark["severity"], mark["label"]))
+            first = min(m["at"] for m in during)
+            add("")
+            add("**Time to first detection: %s.**"
+                % _duration(first - phase["started"]))
+            add("")
+
+        outside = [m for m in marks
+                   if not any(p["started"] <= m["at"] <=
+                              (p["ended"] if p["ended"] else float("inf"))
+                              for p in phases)]
+        if outside:
+            add("## Ingested outside any phase")
+            add("")
+            add("| source | at | severity | label |")
+            add("|---|---|---|---|")
+            for mark in outside:
+                add("| %s | %s | %s | %s |" % (
+                    mark["source"], _stamp(mark["at"]), mark["severity"],
+                    mark["label"]))
+            add("")
+
+        add("## What a proxy log would have held")
+        add("")
+        add("One line per command connection, and nothing else from this "
+            "run is visible from there.")
+        add("")
+        add("```")
+        opened = {}
+        count = 0
+        for entry in self.events.history():
+            peer = entry["fields"].get("peer", "")
+            if entry["event"] == "client-connected":
+                opened[peer] = entry["at"]
+            elif entry["event"] in ("client-gone", "hung-up-on-client"):
+                start = opened.pop(peer, None)
+                if start is None:
+                    continue
+                count += 1
+                add("%s  %s  CONNECT <this server>:%d  200  %ds  ?B" % (
+                    _stamp(start), peer.rsplit(":", 1)[0], self.command_port,
+                    int(entry["at"] - start)))
+        for peer, start in opened.items():
+            count += 1
+            add("%s  %s  CONNECT <this server>:%d  200  %ds  ?B  (open)" % (
+                _stamp(start), peer.rsplit(":", 1)[0], self.command_port,
+                int(now - start)))
+        if not count:
+            add("# nothing -- no command connection was made")
+        add("```")
+        add("")
+
+        captures = self.wire_captures()
+        if captures:
+            add("## The wire, as it actually went out")
+            add("")
+            add("The last handshake, byte for byte, with the deviation from "
+                "RFC 1928 at each step. Handshakes only: the relayed payload "
+                "is the traffic of the network under test and is never kept.")
+            add("")
+            capture = captures[0]
+            add("`%s` → `%s` — %s"
+                % (capture["peer"], capture["target"], capture["outcome"]))
+            add("")
+            add("| | bytes | means |")
+            add("|---|---|---|")
+            for step in capture["steps"]:
+                arrow = "→" if step["direction"] == "to-implant" else "←"
+                add("| %s %s | `%s` | %s |"
+                    % (arrow, step["label"], step["hex"], step["note"]))
+            add("")
+
+        add("## Authorisation")
+        add("")
+        add("Adversary emulation for a detection measurement in a lab the "
+            "operator owns. Relaying outside the private ranges is refused "
+            "unless --allow-public was passed, and this run %s."
+            % ("had it passed" if self.guard and self.guard.allow_public
+               else "did not"))
+        add("")
+        return "\n".join(lines)
+
+
+def _as_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _silence(settings):
+    """Say what nothing-firing means at the keep-alive settings in force.
+
+    "Nothing fired" is two completely different findings depending on the
+    knob, and a debrief that printed one sentence for both would be the most
+    misleading thing in the file.
+    """
+    values = [s for s in settings if s is not None]
+    if not values:
+        return ("That is a result, not a gap -- but the keep-alive during "
+                "this phase was not recorded, so which of the two findings "
+                "it is cannot be said. Declare phases around knob changes.")
+    cadence_shape = any(v <= 0 or v >= 120 for v in values)
+    held_shape = any(0 < v < 120 for v in values)
+    if cadence_shape and not held_shape:
+        return ("That is a finding about the **detection**, not about the "
+                "tunnel: at this setting the client reconnects on a timer "
+                "with near-zero jitter, which is about as easy as a "
+                "periodicity detection ever gets. If it did not fire here, "
+                "it will not fire on the real thing.")
+    if held_shape and not cadence_shape:
+        return ("That is a finding about the **tunnel**, not about the "
+                "detection: at this setting there is one held connection "
+                "and no cadence for a periodicity rule to bin. A proxy log "
+                "holds one CONNECT and a byte count. Nothing was there to "
+                "find, and that is the result worth reporting.")
+    return ("The keep-alive moved between the two shapes inside this phase, "
+            "so a silence here cannot be attributed to either. Put a phase "
+            "boundary at the knob change and run it again.")
+
+
+def _stamp(when):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(when))
+
+
+def _duration(seconds):
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return "%ds" % seconds
+    if seconds < 3600:
+        return "%dm %ds" % (seconds // 60, seconds % 60)
+    return "%dh %dm" % (seconds // 3600, (seconds % 3600) // 60)
+
+
+def _or_dash(value, unit=""):
+    return "—" if value is None else "%s%s" % (value, unit)
+
+
 _RFC_STATUS = {
     1: "general failure -- usually no implant is connected",
     2: "not allowed",
@@ -590,6 +905,16 @@ class _Handler(BaseHTTPRequestHandler):
             return self._stream()
         if route == "/api/wire":
             return self._json({"captures": self.server.wire_captures()})
+        if route == "/api/debrief":
+            body = self.server.debrief().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/markdown; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Disposition",
+                             'attachment; filename="vipertunnel-debrief-%s.md"'
+                             % time.strftime("%Y%m%d-%H%M%S"))
+            self.end_headers()
+            return self.wfile.write(body)
         return self._static(route)
 
     def do_POST(self):
@@ -617,6 +942,19 @@ class _Handler(BaseHTTPRequestHandler):
             if route == "/api/fingerprint":
                 return self._json(self.server.fingerprint(
                     bool(body.get("force"))))
+            if route == "/api/ingest":
+                mark = self.server.marks.add(
+                    body.get("source", "unknown"),
+                    body.get("label", ""),
+                    body.get("at"),
+                    body.get("severity", "info"))
+                return self._json({"mark": mark})
+            if route == "/api/phase":
+                if body.get("stop"):
+                    ended = self.server.phases.stop()
+                    return self._json({"ended": ended})
+                return self._json({"started": self.server.phases.start(
+                    body.get("name", ""), self.server.knob)})
         except (ValueError, TypeError) as exc:
             return self._json({"error": str(exc)}, 400)
         except OSError as exc:

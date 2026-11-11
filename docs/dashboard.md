@@ -66,12 +66,92 @@ never worth the run.
 | **Sessions** | which relays are carrying traffic right now, to what target, over which five-digit port |
 | **Wire tap** | the bytes of the last handshake, with the deviation from RFC 1928 named at each step |
 | **Fingerprint** | what a scanner pointed at this host would get back, beside what the real infrastructure returned |
+| **Phase** | the named stretch of the run in progress, and what was detected in each one so far |
+| **Ingest** | detections from anywhere else, on the same axis as the truth |
 
 The ledger and the proxy log sit side by side, and that is the point of the
 whole repository: the left pane holds everything that happened and the right
 pane holds everything a detection gets. Nothing in it is invented — the
 server does not know what hostname the implant dialled or how many bytes a
 proxy counted, so those stay `?` rather than being guessed at.
+
+### The relay sessions, and what crossed them
+
+The README calls the relays "the part that carries volume", and for a long
+time the only visible fact about them was that they existed. Each live
+session now reports bytes in each direction, a rate, a sparkline of the last
+minute, and **what the first bytes suggest the protocol was** — an HTTP
+request line with its `Host`, a TLS `ClientHello` with its SNI, an SMB
+negotiate, an SSH banner. The blue team's question about a tunnel is "what
+did they touch", and that is answerable from a request line.
+
+The per-second volume also goes under each lane of the timeline, log-scaled
+so that a 4 KiB probe and a 40 MiB transfer fit on one axis. The closing
+`session-close` ledger line carries the byte counts and the protocol
+summary, because those are the facts a volume-based detection would have had.
+
+**The payload itself is never kept.** The sniff buffer is 512 bytes per
+direction and is discarded as soon as the summary is made; none of it reaches
+the ledger, the debrief or the browser. That traffic belongs to the network
+under test.
+
+One limit worth stating plainly: the server only sees the **tunnel leg**. The
+implant-to-target leg is on the victim side and is invisible from here, so
+everything above is the operator's view of the same stream rather than a
+capture of the target's connection.
+
+### Phases, ingest, and the number a purple exercise is for
+
+A measurement is two or three deliberate stretches — "held connection", then
+"cadence", then "traffic through it". **Name them.** Without boundaries an
+alert's timestamp has nothing to be measured against: a report says "the rule
+fired at 14:12" and nobody can say what was running at 14:12. Each boundary
+is a ledger line, so the phases survive in the artefact a finding cites
+rather than only in a browser tab.
+
+`POST /api/ingest` then takes detections from anywhere:
+
+```
+curl -s http://127.0.0.1:8787/api/ingest -d '{
+  "source": "splunk",
+  "label": "Beaconing - periodic outbound CONNECT",
+  "severity": "high",
+  "at": 1794412345 }'
+```
+
+They appear as their own lane on the ground-truth timeline, and the offset
+from the phase start is the **time to detect** — measured rather than
+estimated. `at` is optional and should be the alert's own timestamp, not the
+moment the webhook arrived.
+
+This is deliberately one generic endpoint rather than an integration per
+tool, and it is the extension point: a SIEM webhook, an EDR, a Zeek notice or
+a colleague's annotation all land the same way, and new things need no code
+here, only something that can POST. A running phase keeps an **open** window,
+so a platform whose clock runs a few seconds ahead does not have its alerts
+silently dropped out of the phase they belong to.
+
+### The debrief
+
+`GET /api/debrief` returns a markdown file: the run's settings, the cadence
+per host, every phase with its detections and its time-to-detect, what a
+proxy log would have held, and the last handshake byte for byte. It is
+assembled only from what the ledger already holds, so it is not a second
+version of the truth.
+
+Two things it does that a list of timestamps would not:
+
+- **A silent phase gets the right sentence, and the two are opposites.** At a
+  keep-alive of `0` the client reconnects on a timer with near-zero jitter,
+  so nothing firing is a finding about the **detection**. Below the client's
+  timeout there is one held connection and no cadence to bin, so nothing
+  firing is a finding about the **tunnel**. One sentence for both would be
+  the most misleading line in the file.
+- **It reports the knob being turned inside a phase.** The phase records the
+  value at its start, and the knob exists to be turned mid-run, so a debrief
+  with only the opening value would describe a phase that never existed. When
+  the knob crossed between the two shapes inside one phase, a silence cannot
+  be attributed to either and the file says so.
 
 ### The wire tap, and why it is here
 
@@ -221,6 +301,9 @@ cadence.
 | `POST /api/note` | `{"text": "SIEM alert 4411 fired"}` |
 | `GET /api/wire` | the last eight captured handshakes, annotated |
 | `POST /api/fingerprint` | `{"force": false}` — probe our own command port |
+| `POST /api/phase` | `{"name": "phase 2 - cadence"}`, or `{"stop": true}` |
+| `POST /api/ingest` | `{"source", "label", "severity", "at"}` — any detection, any tool |
+| `GET /api/debrief` | the run as one markdown file |
 
 They are plain JSON over loopback with no authentication, which is the same
 decision the operator SOCKS port already made: loopback keeps other hosts

@@ -128,6 +128,11 @@ server/server-ledger.log
 client/client-ledger.log
 ```
 
+The server's `session-close` line carries the byte counts in each direction
+and what the first bytes suggested the protocol was — the facts a
+volume-based detection would have had. The payload itself is never recorded:
+the relays carry the traffic of the network under test.
+
 Compare a detection's report against **those**, not against its own
 timestamps. A field named for a sleep interval or a jitter does not reliably
 hold one: a "jitter" can turn out to be the largest gap between contacts, and

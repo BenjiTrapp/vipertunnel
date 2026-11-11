@@ -13,8 +13,8 @@ import urllib.error
 import urllib.request
 
 from server.dashboard import Dashboard, EventLog, cadence
-from server.server import (Fleet, Knob, LabGuard, Ledger, SessionBook,
-                           WireLog)
+from server.server import (Fleet, Knob, LabGuard, Ledger, Phases,
+                           SessionBook, WireLog)
 
 
 class CadenceTest(unittest.TestCase):
@@ -80,10 +80,11 @@ class _Board(object):
         self.knob = Knob(60.0)
         self.fleet = Fleet(self.ledger)
         self.wire = WireLog()
+        self.phases = Phases(self.ledger)
         self.board = Dashboard(("127.0.0.1", 0), self.fleet, SessionBook(),
                                self.knob, self.ledger, socks_port=0,
                                command_port=443, wire=self.wire,
-                               guard=LabGuard())
+                               guard=LabGuard(), phases=self.phases)
         self.port = self.board.server_address[1]
         self.thread = threading.Thread(target=self.board.serve_forever,
                                        daemon=True)
@@ -100,6 +101,12 @@ class _Board(object):
                 "http://127.0.0.1:%d%s" % (self.port, route),
                 timeout=5) as response:
             return json.loads(response.read())
+
+    def get_text(self, route):
+        with urllib.request.urlopen(
+                "http://127.0.0.1:%d%s" % (self.port, route),
+                timeout=5) as response:
+            return response.read().decode("utf-8")
 
     def post(self, route, payload):
         request = urllib.request.Request(
@@ -187,6 +194,112 @@ class RoutesTest(unittest.TestCase):
             self.assertEqual(state["totals"]["connections"], 5)
             self.assertEqual(state["totals"]["sessions"], 1)
             self.assertEqual(state["cadence"][0]["connections"], 5)
+
+
+class PurpleTest(unittest.TestCase):
+    """Phases, ingested detections, and the debrief that joins them."""
+
+    def test_a_phase_opens_closes_and_lands_in_the_ledger(self):
+        with _Board() as board:
+            board.post("/api/phase", {"name": "phase 1 - held"})
+            current = board.get("/api/state")["phases"]
+            self.assertEqual(len(current), 1)
+            self.assertIsNone(current[0]["ended"])
+            self.assertEqual(current[0]["keepalive"], 60.0)
+            board.post("/api/phase", {"stop": True})
+            self.assertIsNotNone(board.get("/api/state")["phases"][0]["ended"])
+            events = [e["event"] for e in board.get("/api/state")["events"]]
+            self.assertIn("phase-start", events)
+            self.assertIn("phase-end", events)
+
+    def test_starting_a_phase_closes_the_one_before_it(self):
+        # Phases are a sequence, not a set: two open at once would make an
+        # alert's offset ambiguous, which is the one thing they are for.
+        with _Board() as board:
+            board.post("/api/phase", {"name": "one"})
+            board.post("/api/phase", {"name": "two"})
+            phases = board.get("/api/state")["phases"]
+            self.assertEqual(len(phases), 2)
+            self.assertIsNotNone(phases[0]["ended"])
+            self.assertIsNone(phases[1]["ended"])
+
+    def test_an_ingested_mark_is_timestamped_and_recorded(self):
+        with _Board() as board:
+            board.post("/api/ingest", {"source": "splunk",
+                                       "label": "beaconing rule fired",
+                                       "severity": "high"})
+            marks = board.get("/api/state")["marks"]
+            self.assertEqual(len(marks), 1)
+            self.assertEqual(marks[0]["source"], "splunk")
+            self.assertEqual(marks[0]["severity"], "high")
+            self.assertGreater(marks[0]["at"], 0)
+            events = [e["event"] for e in board.get("/api/state")["events"]]
+            self.assertIn("ingested", events)
+
+    def test_a_mark_may_carry_its_own_time(self):
+        # A SIEM posts after the fact, so the alert's own timestamp is the
+        # one that matters -- not the moment the webhook arrived.
+        with _Board() as board:
+            board.post("/api/ingest", {"source": "sentinel", "label": "x",
+                                       "at": 1700000000})
+            self.assertEqual(board.get("/api/state")["marks"][0]["at"],
+                             1700000000)
+
+    def test_an_unbounded_number_of_sources_is_refused(self):
+        with _Board() as board:
+            for n in range(24):
+                board.post("/api/ingest", {"source": "s%d" % n, "label": "x"})
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                board.post("/api/ingest", {"source": "one-too-many",
+                                           "label": "x"})
+            self.assertEqual(caught.exception.code, 400)
+
+    def test_the_debrief_measures_time_to_detect(self):
+        with _Board() as board:
+            board.post("/api/phase", {"name": "cadence shape"})
+            started = board.get("/api/state")["phases"][0]["started"]
+            board.post("/api/ingest", {"source": "splunk",
+                                       "label": "periodicity rule",
+                                       "at": started + 420})
+            text = board.get_text("/api/debrief")
+        self.assertIn("cadence shape", text)
+        self.assertIn("Time to first detection: 7m 0s", text)
+        self.assertIn("splunk", text)
+
+    def test_the_debrief_calls_a_silent_phase_a_result(self):
+        # The trap this guards: an empty cell reads as missing data, when
+        # "nothing fired" is the finding a held-connection run produces --
+        # and the finding is the opposite one at the other setting, so one
+        # sentence for both would be the most misleading line in the file.
+        with _Board() as board:
+            board.post("/api/phase", {"name": "held connection"})
+            text = board.get_text("/api/debrief")
+        self.assertIn("**Nothing fired.**", text)
+        self.assertIn("finding about the **tunnel**", text)
+
+    def test_a_silent_cadence_phase_blames_the_detection(self):
+        with _Board() as board:
+            board.post("/api/keepalive", {"seconds": 0})
+            board.post("/api/phase", {"name": "cadence"})
+            text = board.get_text("/api/debrief")
+        self.assertIn("finding about the **detection**", text)
+
+    def test_the_debrief_reports_a_knob_turned_inside_a_phase(self):
+        # The phase records the knob at its start, and the knob exists to be
+        # turned mid-run: a debrief with only the opening value would
+        # describe a phase that never existed.
+        with _Board() as board:
+            board.post("/api/phase", {"name": "both shapes"})
+            board.post("/api/keepalive", {"seconds": 0})
+            text = board.get_text("/api/debrief")
+        self.assertIn("Keep-alive was turned inside this phase", text)
+        self.assertIn("moved between the two shapes", text)
+
+    def test_the_debrief_says_so_when_no_phases_were_declared(self):
+        with _Board() as board:
+            text = board.get_text("/api/debrief")
+        self.assertIn("No phases were declared", text)
+        self.assertIn("vipertunnel -- run debrief", text)
 
 
 if __name__ == "__main__":

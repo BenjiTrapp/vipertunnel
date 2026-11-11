@@ -15,8 +15,10 @@
 
 const POLL_MS = 2000;
 const LABEL_W = 118;
-const LANE_H = 52;
+const LANE_H = 66;
+const MARK_H = 26;
 const AXIS_H = 24;
+const PHASE_H = 16;
 const NS = "http://www.w3.org/2000/svg";
 
 const model = {
@@ -26,6 +28,9 @@ const model = {
   sessions: [],
   cadence: [],
   totals: {},
+  volume: {},
+  phases: [],
+  marks: [],
   events: [],
   span: 0,          // 0 is "fit": pick the window from the data
 };
@@ -46,7 +51,8 @@ async function poll() {
     Object.assign(model, {
       server: state.server, knob: state.knob, clients: state.clients,
       sessions: state.sessions, cadence: state.cadence,
-      totals: state.totals || {},
+      totals: state.totals || {}, volume: state.volume || {},
+      phases: state.phases || [], marks: state.marks || [],
     });
     if (state.events && state.events.length >= model.events.length) {
       model.events = state.events;
@@ -288,19 +294,48 @@ function renderFleet() {
     row.insertCell().appendChild(button);
   }
 
-  const sessions = el("sessions").querySelector("tbody");
+  const sessions = el("sessions");
   sessions.textContent = "";
   el("session-count").textContent = model.sessions.length;
   el("session-empty").classList.toggle("hidden", model.sessions.length > 0);
-  el("sessions").classList.toggle("hidden", model.sessions.length === 0);
   for (const session of model.sessions) {
-    const row = sessions.insertRow();
-    row.insertCell().textContent = session.target;
-    row.insertCell().textContent = session.relay_port;
-    row.insertCell().textContent = session.peer;
-    row.insertCell().textContent = duration(session.age_seconds);
+    const card = document.createElement("div");
+    card.className = "session";
+    card.innerHTML =
+      `<div class="session-top">` +
+      `<b>${escapeText(session.target)}</b>` +
+      `<span class="rx">→ ${bytes(session.out_bytes)}</span>` +
+      `<span class="tx">← ${bytes(session.in_bytes)}</span>` +
+      `<span class="k">${bytes(session.rate)}/s · ${duration(session.age_seconds)}</span>` +
+      `<span class="spark">${sparkline(session.recent)}</span>` +
+      `</div>` +
+      `<div class="session-saw">${escapeText(session.summary)}</div>` +
+      `<div class="session-foot k">relay port ${session.relay_port} · via ${escapeText(session.peer)}</div>`;
+    sessions.appendChild(card);
   }
 }
+
+/* The bytes-per-second of one session, small enough to sit in its card. The
+ * relays are the part of this traffic that carries volume, and a number
+ * alone does not show whether it arrived in one burst or steadily. */
+function sparkline(series) {
+  if (!series || series.length < 2) return "";
+  const width = 90, height = 16;
+  const from = series[0][0], span = Math.max(1, series[series.length - 1][0] - from);
+  const peak = Math.max(...series.map((s) => s[1] + s[2]), 1);
+  const points = series.map(([second, out, into]) =>
+    `${((second - from) / span * width).toFixed(1)},` +
+    `${(height - (out + into) / peak * height).toFixed(1)}`);
+  return `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">` +
+    `<polyline points="${points.join(" ")}" fill="none" ` +
+    `stroke="var(--tx)" stroke-width="1.5"/></svg>`;
+}
+
+const bytes = (count) => {
+  if (count < 1024) return `${count} B`;
+  if (count < 1024 * 1024) return `${(count / 1024).toFixed(1)} KiB`;
+  return `${(count / 1048576).toFixed(1)} MiB`;
+};
 
 /* -- the feed -------------------------------------------------------------- */
 
@@ -449,6 +484,72 @@ function sessionSegments() {
 
 const hostPart = (peer) => String(peer).replace(/:\d+$/, "") || "unknown";
 
+const severityClass = (severity) =>
+  /crit|high|alert/.test(String(severity)) ? "high"
+  : /med|warn/.test(String(severity)) ? "medium" : "info";
+
+/* -- purple: phases and ingested detections -------------------------------- */
+
+function renderPurple() {
+  const now = model.server ? model.server.now : Date.now() / 1000;
+  const current = model.phases.find((p) => !p.ended);
+  el("phase-now").textContent = current
+    ? `${current.name} · ${duration(now - current.started)}`
+    : "none";
+  el("phase-stop").classList.toggle("hidden", !current);
+
+  const table = el("phases");
+  const body = table.querySelector("tbody");
+  body.textContent = "";
+  table.classList.toggle("hidden", model.phases.length === 0);
+  for (const phase of model.phases) {
+    const end = phase.ended || now;
+    // A running phase keeps an open window, so an alert from a platform
+    // whose clock runs slightly ahead still lands in the phase it belongs
+    // to rather than falling out of every phase.
+    const horizon = phase.ended || Infinity;
+    const during = model.marks.filter(
+      (m) => m.at >= phase.started && m.at <= horizon);
+    const row = body.insertRow();
+    row.insertCell().textContent = phase.name + (phase.ended ? "" : "  (running)");
+    row.insertCell().textContent =
+      phase.keepalive === null ? "—" : `${phase.keepalive}s`;
+    row.insertCell().textContent = duration(end - phase.started);
+    const found = row.insertCell();
+    /* "Nothing fired" is a result, not a blank. A phase with a keep-alive
+     * under the client's timeout has no cadence to find, so an empty cell
+     * here would read as missing data rather than as the finding. */
+    if (!during.length) {
+      found.textContent = "nothing fired";
+      found.className = "warnish";
+    } else {
+      const first = Math.min(...during.map((m) => m.at));
+      found.textContent = `${during.length} · first after ` +
+        duration(first - phase.started);
+      found.className = "yes";
+    }
+  }
+
+  const feed = el("marks");
+  feed.textContent = "";
+  el("mark-count").textContent = model.marks.length;
+  el("marks-empty").classList.toggle("hidden", model.marks.length > 0);
+  for (const mark of model.marks.slice(-80).reverse()) {
+    const item = document.createElement("li");
+    item.className = "m-" + severityClass(mark.severity);
+    const stamp = document.createElement("time");
+    stamp.textContent = new Date(mark.at * 1000).toISOString().slice(11, 19);
+    const source = document.createElement("span");
+    source.className = "ev";
+    source.textContent = mark.source;
+    const label = document.createElement("span");
+    label.className = "fields";
+    label.textContent = mark.label;
+    item.append(stamp, source, label);
+    feed.appendChild(item);
+  }
+}
+
 const escapeText = (text) => String(text).replace(/[<>&"]/g, (c) =>
   ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
 
@@ -487,7 +588,8 @@ function renderTimeline() {
 
   const hosts = [...new Set(commands.map((s) => s.host))].sort();
   const width = Math.max(chart.clientWidth || 1000, 560);
-  const height = hosts.length * LANE_H + AXIS_H + 10;
+  const marks = model.marks.length ? MARK_H : 0;
+  const height = PHASE_H + hosts.length * LANE_H + marks + AXIS_H + 10;
   const now = model.server ? model.server.now : Date.now() / 1000;
 
   /* `fit` is the default because the useful span is a property of the run,
@@ -547,11 +649,32 @@ function renderTimeline() {
     }, axis).textContent = ago === 0 ? "now" : "-" + duration(ago);
   }
 
+  /* Phases first, behind everything: they are the context an alert's
+   * timestamp is read against, so they belong under the data rather than
+   * competing with it. */
+  for (const phase of model.phases) {
+    const end = phase.ended || now;
+    if (end < from) continue;
+    const x1 = x(phase.started), x2 = Math.max(x(end), x1 + 2);
+    svgEl("rect", {
+      class: "phase-band", x: x1.toFixed(1), y: PHASE_H,
+      width: (x2 - x1).toFixed(1), height: height - AXIS_H - PHASE_H,
+    }, svg);
+    svgEl("line", {
+      class: "phase-edge", x1: x1.toFixed(1), y1: PHASE_H,
+      x2: x1.toFixed(1), y2: height - AXIS_H,
+    }, svg);
+    if (x2 - x1 > 46) {
+      svgEl("text", { class: "phase-name", x: (x1 + 5).toFixed(1), y: 11 },
+            svg).textContent = phase.name;
+    }
+  }
+
   const bars = svgEl("g", { filter: "url(#tl-glow)" }, svg);
   const lanes = new Map();
 
   hosts.forEach((host, index) => {
-    const top = index * LANE_H;
+    const top = PHASE_H + index * LANE_H;
     lanes.set(host, top);
     svgEl("rect", {
       class: "lane-bg", x: LABEL_W, y: top + 4,
@@ -607,10 +730,61 @@ function renderTimeline() {
       const x2 = Math.max(x(session.end), x1 + 2);
       svgEl("rect", {
         x: x1.toFixed(1), y: top + 30, width: (x2 - x1).toFixed(1),
-        height: 9, fill: "url(#g-sess)",
+        height: 8, fill: "url(#g-sess)",
       }, bars);
     }
+
+    /* The volume the relays carried, per second, under the lane. The README
+     * calls the relays "the part that carries volume", and until now that
+     * was the one thing about them with no shape on this chart. Log-scaled,
+     * because a 4 KiB probe and a 40 MiB transfer belong on one axis. */
+    const series = model.volume[host] || [];
+    const base = top + LANE_H - 14;
+    const tall = 18;
+    svgEl("line", {
+      class: "volume-base", x1: LABEL_W, y1: base,
+      x2: LABEL_W + plot, y2: base,
+    }, svg);
+    if (series.length) {
+      const peak = Math.max(...series.map(([, out, into]) => out + into), 1);
+      const step = Math.max(1.5, plot / Math.max(1, span));
+      for (const [second, out, into] of series) {
+        if (second < from) continue;
+        const bar = Math.log1p(out + into) / Math.log1p(peak) * tall;
+        svgEl("rect", {
+          class: "volume", x: x(second).toFixed(1),
+          y: (base - bar).toFixed(1),
+          width: step.toFixed(1), height: bar.toFixed(1),
+        }, svg);
+      }
+      svgEl("text", {
+        class: "volume-peak", x: LABEL_W + 3, y: base - tall - 1,
+      }, svg).textContent = "peak " + bytes(peak) + "/s";
+    }
   });
+
+  /* Detections, on the same axis as the truth. One row, one tick per
+   * ingested mark, so the gap between a thing happening and somebody
+   * noticing is a distance you can see rather than two timestamps to
+   * subtract. */
+  if (marks) {
+    const top = PHASE_H + hosts.length * LANE_H;
+    svgEl("text", { class: "lane-label", x: 4, y: top + 16 }, svg)
+      .textContent = "detections";
+    svgEl("line", {
+      class: "volume-base", x1: LABEL_W, y1: top + 18,
+      x2: LABEL_W + plot, y2: top + 18,
+    }, svg);
+    for (const mark of model.marks) {
+      if (mark.at < from) continue;
+      const mx = x(mark.at).toFixed(1);
+      const kind = "mark mark-" + severityClass(mark.severity);
+      svgEl("line", {
+        class: kind, x1: mx, y1: top + 3, x2: mx, y2: top + 18,
+      }, bars);
+      svgEl("circle", { class: kind, cx: mx, cy: top + 3, r: 2.5 }, bars);
+    }
+  }
 
   // Hover: find the connection under the cursor and describe it.
   const highlight = svgEl("rect", {
@@ -671,6 +845,7 @@ function renderAll() {
   renderFleet();
   renderFeed();
   renderProxyLog();
+  renderPurple();
   renderTimeline();
 }
 
@@ -736,6 +911,35 @@ el("note").onsubmit = async (event) => {
 
 el("wire-refresh").onclick = renderWire;
 el("fp-run").onclick = () => runFingerprint(false);
+
+el("phase").onsubmit = async (event) => {
+  event.preventDefault();
+  const form = new FormData(event.target);
+  await post("/api/phase", { name: form.get("name") });
+  event.target.reset();
+  poll();
+};
+
+el("phase-stop").onclick = async () => {
+  await post("/api/phase", { stop: true });
+  poll();
+};
+
+el("ingest").onsubmit = async (event) => {
+  event.preventDefault();
+  const form = new FormData(event.target);
+  const answer = await post("/api/ingest", {
+    source: form.get("source"),
+    label: form.get("label"),
+    severity: "info",
+  });
+  if (answer.error) {
+    alert(answer.error);
+    return;
+  }
+  event.target.querySelector('[name="label"]').value = "";
+  poll();
+};
 
 el("theme").onclick = () => {
   const root = document.documentElement;
