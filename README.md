@@ -1,5 +1,5 @@
-<p align="center">
-  <img src="file_000000007a008210b0af54399e8d873d.gif" alt="Logo">
+<p align="center" >
+  <img src="file_000000007a008210b0af54399e8d873d.gif" height="300px" alt="Logo">
 </p>
 
 **A reverse SOCKS5 tunnel, reimplemented faithfully on the wire and
@@ -22,10 +22,13 @@ purple-team mode for scoring it.
 ## Why this exists, and what it is not
 
 The original is the Python reverse-SOCKS backdoor InfoGuard Labs documented
-in *Slithering Through the Noise* (2026-04-09). Only its **client** was ever
+in [*Slithering Through the Noise* (2026-04-09)](https://labs.infoguard.ch/posts/slithering_through_the_noise/ ). Only its **client** was ever
 published; the server side was not. So the server here is written to a
 derivation of the client's bytes rather than to a sample, and where the two
 disagree the client is right — it is the artefact that was observed.
+
+Client used for reversing: [VirusTotal](https://www.virustotal.com/gui/file/0f0db5079a9fbd760bb24ee979e2e808b2dc089c17033310838474a53a267f04/community ) 
+
 
 **This reproduces the wire and nothing else.** None of the published class
 names, credentials or typos are here, because the published YARA rules key on
