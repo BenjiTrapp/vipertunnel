@@ -43,6 +43,7 @@ shift
 
 PROXY="${PROXY:-}"
 TIMEOUT="${TIMEOUT:-120}"
+JITTER="${JITTER:-0}"
 LEDGER="${LEDGER:-$HERE/client-ledger.log}"
 PYTHON="${PYTHON:-python3}"
 
@@ -53,12 +54,17 @@ if [ -n "$PROXY" ]; then
 else
     EGRESS="DIRECT -- a proxy-log detection will see nothing"
 fi
+case "$JITTER" in
+    0|0.0|"") CADENCE="flat" ;;
+    *) ARGS+=(--jitter "$JITTER"); CADENCE="spread by +-${JITTER} -- a deviation" ;;
+esac
 
 cat <<BANNER
 tunnel client
   server   ${SERVER}
   egress   ${EGRESS}
   timeout  ${TIMEOUT}s
+  cadence  ${CADENCE}
   ledger   ${LEDGER}
 
 A server quieter than ${TIMEOUT}s makes this reconnect on that period, and

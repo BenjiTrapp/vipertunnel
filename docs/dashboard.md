@@ -75,6 +75,50 @@ pane holds everything a detection gets. Nothing in it is invented — the
 server does not know what hostname the implant dialled or how many bytes a
 proxy counted, so those stay `?` rather than being guessed at.
 
+### The scan, which is the dialect's native operation
+
+The protocol supports `CONNECT` and nothing else, so a TCP connect sweep is
+the one thing it does without being bent — and it is what an operator does
+with a reverse SOCKS tunnel first: find out what the host can reach. It is
+also the bursty, high-volume shape the measurement documentation describes
+and that nothing here could produce deliberately before.
+
+```
+curl -s http://127.0.0.1:8787/api/scan -d '{"targets":"10.0.0.0/28","ports":"445,3389"}'
+```
+
+Every attempt goes through the server's own operator port, so it crosses the
+real translation and opens a real relay session on a real ephemeral port. A
+scan therefore appears on the timeline the way a scan should: a spread of
+five-digit ports in a short window, with the volume to match.
+
+Bounded on four axes, because an unbounded scanner behind a loopback port is
+a different and much worse tool:
+
+| Bound | Why |
+|---|---|
+| every host passes the lab guard, and one failure refuses the **whole** scan | refusing per-target would leave an operator thinking a sweep had covered a range it skipped most of |
+| 2048 attempts, counted before the list is built | a cap that first allocates what it is capping spends seconds and hundreds of megabytes on a request it was always going to refuse |
+| eight attempts at once | the relay broker opens one listener per pending session |
+| three seconds per attempt, shorter than a probe's ten | a probe is one deliberate question and can afford to wait; a sweep spends this on every dark address |
+
+Results come back as a tally — `open`, `refused`, `no-answer` — with the open
+ports listed individually. A `/28` sweep is mostly silence, and four hundred
+identical "no answer" rows would bury the three that matter.
+
+### The read-only view
+
+`--dashboard-view PORT` serves a second dashboard that cannot change the run:
+the knob, hang-up, probe, phase and scan routes all answer `403`. It exists
+so both teams can watch the same ground truth during a joint exercise with
+one hand on the controls.
+
+**`/api/ingest` stays open on it**, and that is the point rather than an
+oversight: without it the read-only view would be a screen to look at instead
+of a way for the other team to put its findings on the same axis. Both
+dashboards share one set of marks, so a detection posted to either shows up
+on both.
+
 ### The relay sessions, and what crossed them
 
 The README calls the relays "the part that carries volume", and for a long
@@ -283,11 +327,15 @@ overnight held connection want windows three orders of magnitude apart, and a
 fixed default puts one of them in the last pixel column. The useful span is a
 property of the run, so it is read from the run.
 
-**A gap is labelled only where it changes.** The number between two command
-connections is what a periodicity detection is looking for — but a steady run
-wrote the same number thirty-three times, which hid it. Now a label means
-"the rhythm changed here", and a run with one label is a run with one
-cadence.
+**A gap is labelled only where it is worth reading.** The number between two
+command connections is what a periodicity detection is looking for — but a
+steady run wrote the same number thirty-three times, which hid it. The rule
+took two tries: "label where the number changes" keeps a flat run to one
+label, which is right, but under client-side jitter every gap differs from
+the last and it degenerated into labelling all of them. What is worth reading
+on a jittered run is the outlier, not each gap; the spread itself is already
+the CV in the strip. So the first gap is labelled, then only the ones more
+than a quarter away from the running mean.
 
 ## The routes
 
@@ -303,7 +351,11 @@ cadence.
 | `POST /api/fingerprint` | `{"force": false}` — probe our own command port |
 | `POST /api/phase` | `{"name": "phase 2 - cadence"}`, or `{"stop": true}` |
 | `POST /api/ingest` | `{"source", "label", "severity", "at"}` — any detection, any tool |
+| `POST /api/scan` | `{"targets": "10.0.0.0/28", "ports": "445,3389"}` |
+| `GET /api/scan` | progress and findings of the sweep in flight |
 | `GET /api/debrief` | the run as one markdown file |
+
+On a `--dashboard-view` port every `POST` except `/api/ingest` answers `403`.
 
 They are plain JSON over loopback with no authentication, which is the same
 decision the operator SOCKS port already made: loopback keeps other hosts

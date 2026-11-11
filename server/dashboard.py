@@ -80,6 +80,15 @@ _PROBE_SEND_MAX = 1024
 _PROBE_READ_MAX = 4096
 _PROBE_TIMEOUT = 10.0
 
+# A scan through the tunnel is the dialect's native operation, and an
+# unbounded one behind a loopback port is a different tool entirely.
+_SCAN_MAX = 2048
+_SCAN_WORKERS = 8
+# Shorter than a probe's deadline on purpose: a probe is one deliberate
+# question and can afford to wait, while a sweep spends this on every dark
+# address and a /28 of them at ten seconds each is a different experience.
+_SCAN_TIMEOUT = 3.0
+
 _MIME = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -243,6 +252,193 @@ class Marks(object):
             return sorted({mark["source"] for mark in self._marks})
 
 
+class Scan(object):
+    """A TCP connect sweep through the tunnel.
+
+    This is the *native* operation of the dialect: it supports CONNECT and
+    nothing else, so a connect scan is the one thing the protocol does
+    without being bent. It is also what an operator does with a reverse
+    SOCKS tunnel first -- find out what the host can reach -- and it is the
+    bursty, high-volume shape the documentation says the relays produce and
+    nothing here could produce on purpose until now.
+
+    Every attempt goes through the server's own operator port, so it crosses
+    the real translation and opens a real relay session on a real ephemeral
+    port. A scan therefore shows up on the timeline the way a scan should:
+    a spread of five-digit ports in a short window.
+
+    Bounded on four axes, because an unbounded scanner behind a loopback
+    port is a different and much worse tool:
+
+      * every target passes the lab guard, one at a time,
+      * at most `_SCAN_MAX` attempts per scan,
+      * at most `_SCAN_WORKERS` at once,
+      * a short per-attempt deadline.
+    """
+
+    def __init__(self, board):
+        self._board = board
+        self._lock = threading.Lock()
+        self._state = {"running": False, "done": 0, "total": 0,
+                       "findings": [], "tally": {}, "started": None,
+                       "note": ""}
+
+    def status(self):
+        with self._lock:
+            state = dict(self._state)
+            state["tally"] = dict(state["tally"])
+            state["findings"] = list(state["findings"])[-200:]
+        return state
+
+    def start(self, targets, ports):
+        hosts = _expand_hosts(targets)
+        wanted = _expand_ports(ports)
+        if not hosts or not wanted:
+            raise ValueError("give at least one host and one port")
+        # Count before building: a cap that first allocates the thing it is
+        # capping spends seconds and hundreds of megabytes on a request it
+        # was always going to refuse.
+        planned = len(hosts) * len(wanted)
+        if planned > _SCAN_MAX:
+            raise ValueError("%d attempts is over the %d cap; narrow the "
+                             "range or the port list" % (planned, _SCAN_MAX))
+        refused = [h for h in hosts if self._board.guard
+                   and self._board.guard.refuse(h)]
+        if refused:
+            raise ValueError("%d of %d hosts are outside the lab (%s...); "
+                             "this will not scan them"
+                             % (len(refused), len(hosts), refused[0]))
+        attempts = [(host, port) for host in hosts for port in wanted]
+        with self._lock:
+            if self._state["running"]:
+                raise ValueError("a scan is already running")
+            self._state = {"running": True, "done": 0,
+                           "total": len(attempts), "findings": [],
+                           "tally": {}, "started": time.time(),
+                           "note": "%d hosts x %d ports" % (len(hosts),
+                                                            len(wanted))}
+        self._board.ledger.record("scan-start", by="dashboard",
+                                  hosts=len(hosts), ports=len(wanted),
+                                  attempts=len(attempts))
+        threading.Thread(target=self._run, args=(attempts,),
+                         name="scan", daemon=True).start()
+        return self.status()
+
+    def _run(self, attempts):
+        queue_ = list(reversed(attempts))
+        lock = threading.Lock()
+
+        def worker():
+            while True:
+                with lock:
+                    if not queue_:
+                        return
+                    host, port = queue_.pop()
+                verdict = self._one(host, port)
+                with self._lock:
+                    self._state["done"] += 1
+                    tally = self._state["tally"]
+                    tally[verdict["state"]] = tally.get(verdict["state"], 0) + 1
+                    # Only what an operator reads one by one is kept as a
+                    # finding. A /28 sweep is mostly silence, and a list of
+                    # four hundred identical "no answer" rows would bury the
+                    # three that matter.
+                    if verdict["state"] != "refused":
+                        keep = self._state["findings"]
+                        if verdict["state"] == "open" or len(keep) < 40:
+                            keep.append(verdict)
+
+        workers = [threading.Thread(target=worker, daemon=True)
+                   for _ in range(min(_SCAN_WORKERS, len(attempts)))]
+        for thread in workers:
+            thread.start()
+        for thread in workers:
+            thread.join()
+
+        with self._lock:
+            self._state["running"] = False
+            tally = dict(self._state["tally"])
+        self._board.ledger.record("scan-end", by="dashboard",
+                                  attempts=len(attempts),
+                                  open_found=tally.get("open", 0),
+                                  refused=tally.get("refused", 0),
+                                  no_answer=tally.get("no-answer", 0))
+
+    def _one(self, host, port):
+        """One CONNECT through the tunnel, named the way a scanner names it."""
+        where = {"host": host, "port": port}
+        try:
+            result = self._board.probe(host, port, "", timeout=_SCAN_TIMEOUT)
+        except socket.timeout:
+            return dict(where, state="no-answer",
+                        detail="no answer in %gs -- filtered or dark"
+                               % _SCAN_TIMEOUT)
+        except OSError as exc:
+            return dict(where, state="error", detail=str(exc)[:120])
+        if result.get("ok"):
+            self._board.ledger.record("scan-open", host=host, port=port)
+            return dict(where, state="open", detail="the implant reached it")
+        status = result.get("status")
+        if status == 5:
+            return dict(where, state="refused", detail="the target refused")
+        if status == 4:
+            return dict(where, state="no-answer",
+                        detail=result.get("detail", "")[:120])
+        if status == 1:
+            # No implant connected, so nothing after this will work either.
+            with self._lock:
+                self._state["note"] = ("no implant is connected -- the rest "
+                                       "of this scan will fail the same way")
+            return dict(where, state="no-implant",
+                        detail=result.get("detail", "")[:120])
+        return dict(where, state="error",
+                    detail=result.get("detail", "unexplained")[:120])
+
+
+def _expand_hosts(text):
+    """Accept `10.0.0.5`, `10.0.0.0/24` or a comma-separated mix of both.
+
+    Hand-rolled rather than `ipaddress` only for the /24-and-smaller cases
+    this needs; anything wider is over the attempt cap anyway.
+    """
+    hosts = []
+    for piece in str(text).replace(" ", "").split(","):
+        if not piece:
+            continue
+        if "/" not in piece:
+            hosts.append(piece)
+            continue
+        network, _, bits = piece.partition("/")
+        try:
+            width = int(bits)
+            packed = socket.inet_aton(network)
+        except (ValueError, OSError):
+            raise ValueError("%s is not an address or a CIDR" % piece)
+        if not 20 <= width <= 32:
+            raise ValueError("%s: only /20 to /32 are accepted" % piece)
+        base = int.from_bytes(packed, "big") & (0xffffffff << (32 - width))
+        for offset in range(1 << (32 - width)):
+            hosts.append(socket.inet_ntoa((base + offset).to_bytes(4, "big")))
+    return hosts
+
+
+def _expand_ports(text):
+    ports = []
+    for piece in str(text).replace(" ", "").split(","):
+        if not piece:
+            continue
+        low, _, high = piece.partition("-")
+        try:
+            start = int(low)
+            end = int(high) if high else start
+        except ValueError:
+            raise ValueError("%s is not a port or a range" % piece)
+        if not (0 < start <= end <= 65535):
+            raise ValueError("%s is not a usable port range" % piece)
+        ports.extend(range(start, end + 1))
+    return ports
+
+
 class Dashboard(ThreadingHTTPServer):
     """The HTTP side. Loopback only; see the module docstring for why."""
 
@@ -251,7 +447,8 @@ class Dashboard(ThreadingHTTPServer):
 
     def __init__(self, address, fleet, sessions, knob, ledger,
                  socks_port, command_port, socks_credentials=None,
-                 wire=None, guard=None, phases=None):
+                 wire=None, guard=None, phases=None, marks=None,
+                 readonly=False):
         self.fleet = fleet
         self.sessions = sessions
         self.knob = knob
@@ -262,10 +459,15 @@ class Dashboard(ThreadingHTTPServer):
         self.wire = wire
         self.guard = guard
         self.phases = phases
-        self.marks = Marks(ledger)
+        # Two dashboards on one run share the marks, so the blue team's
+        # read-only view shows the same ingested detections the operator's
+        # does rather than an empty lane.
+        self.marks = marks if marks is not None else Marks(ledger)
+        self.readonly = readonly
         self.started = time.time()
         self.events = EventLog()
         self.relay_ports = []
+        self.scan = Scan(self)
         # Arrival times per implant host, for the cadence. Keyed by host and
         # not by peer, because the source port is different on every
         # reconnect -- which is the thing being counted.
@@ -330,6 +532,7 @@ class Dashboard(ThreadingHTTPServer):
                 "socks_port": self.socks_port,
                 "socks_auth": self.socks_credentials is not None,
                 "lab_only": bool(self.guard and not self.guard.allow_public),
+                "readonly": self.readonly,
                 "started": self.started,
                 "uptime_seconds": int(time.time() - self.started),
                 "now": time.time(),
@@ -499,7 +702,7 @@ class Dashboard(ThreadingHTTPServer):
                      "that would give the emulation away"},
         ]
 
-    def probe(self, host, port, payload=""):
+    def probe(self, host, port, payload="", timeout=None):
         """Open one session through the tunnel, the way `curl --socks5` does.
 
         Deliberately an RFC 1928 conversation with this server's own operator
@@ -507,6 +710,7 @@ class Dashboard(ThreadingHTTPServer):
         the same translation an operator's tool would, and a probe that works
         proves the whole path rather than half of it.
         """
+        deadline = timeout or _PROBE_TIMEOUT
         raw = payload.encode("utf-8", "replace")[:_PROBE_SEND_MAX]
         if self.guard is not None:
             refusal = self.guard.refuse(host)
@@ -514,9 +718,9 @@ class Dashboard(ThreadingHTTPServer):
                 return {"ok": False, "status": None, "detail": refusal}
         started = time.monotonic()
         sock = socket.create_connection(("127.0.0.1", self.socks_port),
-                                        timeout=_PROBE_TIMEOUT)
+                                        timeout=deadline)
         try:
-            sock.settimeout(_PROBE_TIMEOUT)
+            sock.settimeout(deadline)
             if self.socks_credentials:
                 user, secret = self.socks_credentials
                 sock.sendall(b"\x05\x01\x02")
@@ -905,6 +1109,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._stream()
         if route == "/api/wire":
             return self._json({"captures": self.server.wire_captures()})
+        if route == "/api/scan":
+            return self._json(self.server.scan.status())
         if route == "/api/debrief":
             body = self.server.debrief().encode("utf-8")
             self.send_response(200)
@@ -920,6 +1126,13 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         route = self.path.split("?", 1)[0]
         body = self._body()
+        if self.server.readonly and route != "/api/ingest":
+            # The blue team's view may still post detections -- that is the
+            # whole point of it -- but it must not be able to turn the knob,
+            # hang up on an implant or drive traffic. A joint exercise with
+            # one operator and several watchers needs exactly this line.
+            return self._json({"error": "this view is read-only; only "
+                                        "/api/ingest is open on it"}, 403)
         try:
             if route == "/api/keepalive":
                 return self._json(
@@ -955,6 +1168,9 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._json({"ended": ended})
                 return self._json({"started": self.server.phases.start(
                     body.get("name", ""), self.server.knob)})
+            if route == "/api/scan":
+                return self._json(self.server.scan.start(
+                    body.get("targets", ""), body.get("ports", "")))
         except (ValueError, TypeError) as exc:
             return self._json({"error": str(exc)}, 400)
         except OSError as exc:

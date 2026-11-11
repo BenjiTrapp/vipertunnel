@@ -118,6 +118,19 @@
     </form>
     <output id="probe-out"></output>
 
+    <div class="panel-head sub"><h2>scan through the tunnel</h2><span class="count" id="scan-state">idle</span></div>
+    <p class="d">The dialect supports CONNECT and nothing else, so a TCP
+      connect sweep is the one thing it does without being bent — and it is
+      the bursty spread of five-digit relay ports the documentation
+      describes. Every target passes the lab guard; capped at 2048 attempts,
+      eight at a time.</p>
+    <form id="scan">
+      <input name="targets" placeholder="10.0.0.0/28 or a list" required>
+      <input name="ports" placeholder="445,3389" value="445,3389" required>
+      <button type="submit">scan</button>
+    </form>
+    <output id="scan-out"></output>
+
     <div class="panel-head sub"><h2>mark the ledger</h2></div>
     <p class="d">A dated line in the same file as the ground truth — the
       marker you want at the moment an alert fires.</p>

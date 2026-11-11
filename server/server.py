@@ -1184,6 +1184,13 @@ def main(argv=None):
                              "have, so it changes what a scan of this host "
                              "reports. Reach it over an SSH forward rather "
                              "than exposing it.")
+    parser.add_argument("--dashboard-view", type=int, metavar="PORT",
+                        help="serve a second, READ-ONLY dashboard on this "
+                             "port -- for the blue team to watch the same "
+                             "ground truth during a joint exercise without "
+                             "being able to change the run. It can still "
+                             "POST to /api/ingest, which is the point of "
+                             "having it.")
     parser.add_argument("--allow-public", action="store_true",
                         help="permit relaying to addresses outside the "
                              "private ranges, loopback and link-local. OFF "
@@ -1261,6 +1268,22 @@ def main(argv=None):
         LOG.info("dashboard on http://127.0.0.1:%d -- out of band, and a "
                  "port this family does not have", args.dashboard)
 
+    view = None
+    if args.dashboard_view:
+        if board is None:
+            LOG.error("--dashboard-view needs --dashboard as well")
+            return 2
+        view = _dashboard_class()(
+            ("127.0.0.1", args.dashboard_view), fleet, sessions, knob, ledger,
+            socks_port=args.socks, command_port=args.port,
+            socks_credentials=credentials, wire=wire, guard=guard,
+            phases=phases, marks=board.marks, readonly=True)
+        threads.append(threading.Thread(target=view.serve_forever,
+                                        name="dashboard-view", daemon=True))
+        LOG.info("read-only view on http://127.0.0.1:%d -- for the blue "
+                 "team; it can ingest detections and change nothing else",
+                 args.dashboard_view)
+
     for thread in threads:
         thread.start()
 
@@ -1271,6 +1294,8 @@ def main(argv=None):
         LOG.info("stopping")
     finally:
         stop.set()
+        if view is not None:
+            view.shutdown()
         if board is not None:
             board.shutdown()
         operator.shutdown()

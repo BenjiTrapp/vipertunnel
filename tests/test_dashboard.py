@@ -12,7 +12,8 @@ import unittest
 import urllib.error
 import urllib.request
 
-from server.dashboard import Dashboard, EventLog, cadence
+from server.dashboard import (Dashboard, EventLog, cadence, _expand_hosts,
+                              _expand_ports)
 from server.server import (Fleet, Knob, LabGuard, Ledger, Phases,
                            SessionBook, WireLog)
 
@@ -75,6 +76,9 @@ class EventLogTest(unittest.TestCase):
 class _Board(object):
     """A dashboard on a port the kernel picked, torn down afterwards."""
 
+    def __init__(self, readonly=False):
+        self.readonly = readonly
+
     def __enter__(self):
         self.ledger = Ledger(None)
         self.knob = Knob(60.0)
@@ -84,7 +88,8 @@ class _Board(object):
         self.board = Dashboard(("127.0.0.1", 0), self.fleet, SessionBook(),
                                self.knob, self.ledger, socks_port=0,
                                command_port=443, wire=self.wire,
-                               guard=LabGuard(), phases=self.phases)
+                               guard=LabGuard(), phases=self.phases,
+                               readonly=self.readonly)
         self.port = self.board.server_address[1]
         self.thread = threading.Thread(target=self.board.serve_forever,
                                        daemon=True)
@@ -300,6 +305,82 @@ class PurpleTest(unittest.TestCase):
             text = board.get_text("/api/debrief")
         self.assertIn("No phases were declared", text)
         self.assertIn("vipertunnel -- run debrief", text)
+
+
+class ScanTest(unittest.TestCase):
+    """The sweep, and the four bounds that keep it from being a scanner."""
+
+    def test_hosts_and_ports_expand(self):
+        self.assertEqual(_expand_hosts("10.0.0.5"), ["10.0.0.5"])
+        self.assertEqual(len(_expand_hosts("192.168.1.0/30")), 4)
+        self.assertEqual(_expand_ports("445,3389,8000-8002"),
+                         [445, 3389, 8000, 8001, 8002])
+
+    def test_a_range_wider_than_a_slash_twenty_is_refused(self):
+        # Not a preference: /8 is sixteen million attempts and the cap would
+        # catch it anyway, but the error should name the real reason.
+        with self.assertRaises(ValueError) as caught:
+            _expand_hosts("10.0.0.0/8")
+        self.assertIn("/20 to /32", str(caught.exception))
+
+    def test_nonsense_is_refused_rather_than_skipped(self):
+        for bad in ("nope/24", "10.0.0.0/notanumber"):
+            with self.assertRaises(ValueError):
+                _expand_hosts(bad)
+        for bad in ("http", "0", "70000"):
+            with self.assertRaises(ValueError):
+                _expand_ports(bad)
+
+    def test_a_scan_over_the_cap_is_refused_before_it_starts(self):
+        # "Before it starts" is literal: the cap is checked against a count,
+        # not against a built list. A /20 by a hundred ports is four hundred
+        # thousand tuples to allocate and then throw away.
+        with _Board() as board:
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                board.post("/api/scan", {"targets": "10.0.0.0/20",
+                                         "ports": "1-100"})
+            self.assertEqual(caught.exception.code, 400)
+            self.assertIn("over the", caught.exception.read().decode())
+            self.assertFalse(board.get("/api/scan")["running"])
+
+    def test_a_target_outside_the_lab_stops_the_whole_scan(self):
+        # Refusing per-target would leave an operator thinking the sweep had
+        # covered a range it skipped most of.
+        with _Board() as board:
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                board.post("/api/scan", {"targets": "8.8.8.0/30",
+                                         "ports": "53"})
+            self.assertEqual(caught.exception.code, 400)
+
+    def test_an_empty_request_is_refused(self):
+        with _Board() as board:
+            with self.assertRaises(urllib.error.HTTPError):
+                board.post("/api/scan", {"targets": "", "ports": ""})
+
+
+class ReadOnlyTest(unittest.TestCase):
+    def test_a_read_only_view_refuses_everything_but_ingest(self):
+        with _Board(readonly=True) as board:
+            for route, payload in (("/api/keepalive", {"seconds": 0}),
+                                   ("/api/hangup", {"client": 1}),
+                                   ("/api/phase", {"name": "x"}),
+                                   ("/api/scan", {"targets": "10.0.0.1",
+                                                  "ports": "80"}),
+                                   ("/api/probe", {"host": "10.0.0.1",
+                                                   "port": 80})):
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    board.post(route, payload)
+                self.assertEqual(caught.exception.code, 403, route)
+            self.assertEqual(board.knob.seconds, 60.0)
+
+    def test_the_blue_team_may_still_ingest_detections(self):
+        # Without this the read-only view would be a screen to look at
+        # rather than a way for the other team to put its findings on the
+        # same axis, which is the only reason it exists.
+        with _Board(readonly=True) as board:
+            board.post("/api/ingest", {"source": "blue", "label": "saw it"})
+            self.assertEqual(len(board.get("/api/state")["marks"]), 1)
+            self.assertTrue(board.get("/api/state")["server"]["readonly"])
 
 
 if __name__ == "__main__":

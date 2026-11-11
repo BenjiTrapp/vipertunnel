@@ -39,6 +39,34 @@ A cadence other than ~120 s therefore has to come from the client's
 `--timeout`, which this exposes and labels a deviation — the client prints a
 warning when it is not 120.
 
+### Jitter, and why it cannot live on the server
+
+The same asymmetry decides where jitter has to go. The reconnect period *is*
+the client's read deadline, so only the client can spread it. A jitter knob
+on the server would have described a control it does not have: the server
+does not choose the period at all.
+
+`client.py --jitter FRACTION` spreads the deadline uniformly over
+`timeout × (1 ± FRACTION)`:
+
+| `--jitter` | Period at a 120 s timeout | Coefficient of variation |
+|---|---|---|
+| `0` (the original) | a flat 120 s | ~0.00 — a machine on a timer |
+| `0.15` | 102–138 s | ~0.09 |
+| `0.35` | 78–162 s | ~0.17 |
+| `0.60` | 48–192 s | ~0.30 |
+
+That is the dial for the question a periodicity detection actually poses:
+**how much jitter does it tolerate before it stops firing?** Run the same
+shape at rising jitter and read the threshold off the ledger. Measured here
+at `0.35`: gaps of 7.9, 9.1, 7.7, 8.4, 11.8, 8.4 and 7.2 seconds against a
+10-second timeout — CV 0.161, and the verdict moves from "a timer" to
+"periodic with some jitter".
+
+**The original has no jitter**, so a CV above zero is yours and the finding
+has to say it was set. The client warns on start-up and the value goes in the
+ledger's `client-start` line.
+
 Note the third edge in the diagram too: **a relay session resets the read
 deadline**, because reading the announced port is a successful read. So a run
 with traffic in it has looser cadence than the knob alone predicts. The

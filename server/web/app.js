@@ -684,6 +684,14 @@ function renderTimeline() {
       .textContent = host;
 
     const mine = commands.filter((s) => s.host === host && s.end > from);
+    /* Gap labels, and the rule took two tries. "Label where the number
+     * changes" keeps a flat run to one label, which is right -- but under
+     * client-side jitter every gap differs from the last, so it degenerated
+     * into labelling all of them. What is worth reading on a jittered run is
+     * not each gap, it is the outlier: the spread itself is already the CV
+     * in the strip. So: label the first, then only what sits more than a
+     * quarter away from the running mean. */
+    let gapSum = 0, gapCount = 0;
     mine.forEach((segment, position) => {
       const x1 = x(segment.start);
       const x2 = Math.max(x(segment.end), x1 + 2);
@@ -713,9 +721,12 @@ function renderTimeline() {
       const previous = mine[position - 1];
       if (previous && previous.end) {
         const gap = Math.round(segment.start - previous.start);
-        const before = position > 1
-          ? Math.round(previous.start - mine[position - 2].start) : null;
-        if (gap !== before && x1 - x(previous.start) > 28) {
+        const mean = gapCount ? gapSum / gapCount : null;
+        const notable = mean === null ||
+          Math.abs(gap - mean) / Math.max(mean, 1) > 0.25;
+        gapSum += gap;
+        gapCount += 1;
+        if (notable && x1 - x(previous.start) > 28) {
           svgEl("text", {
             class: "gap-label", x: ((x(previous.start) + x1) / 2).toFixed(1),
             y: top + 40, "text-anchor": "middle",
@@ -831,6 +842,59 @@ function renderTimeline() {
   });
 }
 
+/* -- scan ------------------------------------------------------------------ */
+
+/* Polled rather than streamed: a scan reports progress, and a progress
+ * number that arrives twice a second is no more useful than one that
+ * arrives once. */
+let scanTimer = null;
+
+async function renderScan() {
+  const state = await (await fetch("/api/scan")).json();
+  const badge = el("scan-state");
+  const out = el("scan-out");
+  badge.textContent = state.running
+    ? `${state.done}/${state.total}`
+    : state.total ? "done" : "idle";
+
+  if (!state.total) { out.textContent = ""; return; }
+  const tally = state.tally || {};
+  const open = state.findings.filter((f) => f.state === "open");
+  const other = state.findings.filter((f) => f.state !== "open");
+
+  out.textContent = "";
+  const head = document.createElement("div");
+  head.className = state.running ? "" : "ok";
+  const counts = Object.entries(tally)
+    .map(([name, n]) => `${n} ${name}`).join(" · ");
+  head.textContent = `${state.note} — ${state.done} of ${state.total}` +
+    (counts ? `: ${counts}` : "") + (state.running ? " …" : "");
+  out.appendChild(head);
+
+  if (open.length) {
+    const list = document.createElement("pre");
+    list.textContent = open
+      .map((f) => `${f.host}:${f.port}  open`).join("\n");
+    out.appendChild(list);
+  }
+  if (other.length) {
+    const notes = document.createElement("div");
+    notes.className = "bad";
+    notes.style.marginTop = "6px";
+    notes.textContent = other.slice(-2)
+      .map((f) => `${f.host}:${f.port} — ${f.detail}`).join(" · ");
+    out.appendChild(notes);
+  }
+
+  if (state.running && !scanTimer) {
+    scanTimer = setInterval(renderScan, 1500);
+  } else if (!state.running && scanTimer) {
+    clearInterval(scanTimer);
+    scanTimer = null;
+    poll();
+  }
+}
+
 /* -- helpers --------------------------------------------------------------- */
 
 function duration(seconds) {
@@ -912,6 +976,20 @@ el("note").onsubmit = async (event) => {
 el("wire-refresh").onclick = renderWire;
 el("fp-run").onclick = () => runFingerprint(false);
 
+el("scan").onsubmit = async (event) => {
+  event.preventDefault();
+  const form = new FormData(event.target);
+  const answer = await post("/api/scan", {
+    targets: form.get("targets"),
+    ports: form.get("ports"),
+  });
+  if (answer.error) {
+    el("scan-out").innerHTML = `<div class="bad">${escapeText(answer.error)}</div>`;
+    return;
+  }
+  renderScan();
+};
+
 el("phase").onsubmit = async (event) => {
   event.preventDefault();
   const form = new FormData(event.target);
@@ -956,4 +1034,5 @@ window.addEventListener("resize", renderTimeline);
 poll();
 stream();
 renderWire();
+renderScan();        // a scan from before this tab was opened still counts
 setInterval(poll, POLL_MS);
