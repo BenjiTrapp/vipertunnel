@@ -17,8 +17,10 @@ import unittest
 
 from client.client import Tunnel
 from client.client import Ledger as ClientLedger
+from server.dashboard import build_pcap
 from server.server import (Fleet, Knob, LabGuard, Ledger, OperatorServer,
-                           RelayBroker, SessionBook, WireLog, _serve_clients)
+                           Phases, RelayBroker, SessionBook, TapLog, WireLog,
+                           _serve_clients)
 
 
 class _Echo(object):
@@ -64,13 +66,15 @@ class _Echo(object):
 class _Tunnel(object):
     """Both halves, wired together on loopback."""
 
-    def __init__(self, keepalive=0.5):
+    def __init__(self, keepalive=0.5, tap=False):
         self.keepalive = keepalive
+        self.want_tap = tap
 
     def __enter__(self):
         self.ledger = Ledger(None)
         self.fleet = Fleet(self.ledger)
-        self.sessions = SessionBook()
+        self.sessions = SessionBook(tap=self.want_tap)
+        self.tap = TapLog() if self.want_tap else None
         self.stop = threading.Event()
 
         self.listener = socket.socket()
@@ -84,7 +88,8 @@ class _Tunnel(object):
         self.operator = OperatorServer(
             ("127.0.0.1", 0), self.fleet, RelayBroker("127.0.0.1",
                                                       self.ledger),
-            self.sessions, self.ledger, None, None, self.wire, LabGuard())
+            self.sessions, self.ledger, None, None, self.wire, LabGuard(),
+            self.tap)
         self.socks_port = self.operator.server_address[1]
 
         self.threads = [
@@ -281,6 +286,119 @@ class LabGuardTest(unittest.TestCase):
             self.assertEqual(reply[1], 5, "expected a refusal")
             self.assertEqual(tunnel.wire.snapshot(), [],
                              "nothing should have been sent to the implant")
+
+
+class TapTest(unittest.TestCase):
+    """The payload tap, and the boundaries that make it defensible."""
+
+    def test_off_by_default(self):
+        with _Tunnel() as tunnel, _Echo() as echo:
+            self.assertIsNone(tunnel.tap)
+            sock, _ = tunnel.connect(echo.address)
+            self.addCleanup(sock.close)
+            sock.sendall(b"a secret")
+            sock.recv(64)
+            session = tunnel.sessions.snapshot()[0]
+            head, tail, dropped = tunnel.sessions._open[
+                session["id"]]["meter"].records()
+            self.assertEqual((head, tail), ([], []))
+            self.assertGreater(dropped, 0, "bytes crossed but were not kept")
+
+    def test_on_it_keeps_the_payload_in_order(self):
+        with _Tunnel(tap=True) as tunnel, _Echo() as echo:
+            sock, _ = tunnel.connect(echo.address)
+            self.addCleanup(sock.close)
+            sock.sendall(b"knock knock")
+            self.assertEqual(sock.recv(64), b"KNOCK KNOCK")
+            sock.close()
+            for _ in range(60):
+                if tunnel.tap.snapshot():
+                    break
+                threading.Event().wait(0.05)
+            entry = tunnel.tap.snapshot()[0]
+        sent = b"".join(d for _, direction, d in entry["records"]
+                        if direction == 0)
+        back = b"".join(d for _, direction, d in entry["records"]
+                        if direction == 1)
+        self.assertEqual(sent, b"knock knock")
+        self.assertEqual(back, b"KNOCK KNOCK")
+        self.assertEqual(entry["dropped"], 0)
+
+    def test_the_payload_never_reaches_the_ledger(self):
+        # The whole defence of the tap rests on this: the ledger is the file
+        # that gets attached to a report, and it must stay quotable.
+        lines = []
+        with _Tunnel(tap=True) as tunnel, _Echo() as echo:
+            tunnel.ledger.subscribe(
+                lambda stamp, event, fields: lines.append((event, fields)))
+            sock, _ = tunnel.connect(echo.address)
+            self.addCleanup(sock.close)
+            sock.sendall(b"CORRECT-HORSE-BATTERY")
+            sock.recv(64)
+            sock.close()
+            threading.Event().wait(0.6)
+        flat = repr(lines)
+        self.assertNotIn("CORRECT-HORSE-BATTERY", flat)
+        self.assertNotIn("correct-horse", flat.lower())
+        self.assertIn("session-close", [event for event, _ in lines])
+
+    def test_the_head_is_bounded_and_says_what_it_dropped(self):
+        with _Tunnel(tap=True) as tunnel, _Echo() as echo:
+            sock, _ = tunnel.connect(echo.address)
+            self.addCleanup(sock.close)
+            sock.sendall(b"z" * 40000)
+            got = 0
+            while got < 40000:
+                chunk = sock.recv(65535)
+                if not chunk:
+                    break
+                got += len(chunk)
+            session = tunnel.sessions.snapshot()[0]
+            head, tail, dropped = tunnel.sessions._open[
+                session["id"]]["meter"].records()
+        kept = sum(len(r[2]) for r in head + tail)
+        self.assertLess(kept, 40000, "the tap must not keep the stream")
+        self.assertGreater(dropped, 0)
+
+    def test_the_pcap_is_a_pcap_and_carries_the_bytes(self):
+        with _Tunnel(tap=True) as tunnel, _Echo() as echo:
+            sock, _ = tunnel.connect(echo.address)
+            self.addCleanup(sock.close)
+            sock.sendall(b"hello wireshark")
+            sock.recv(64)
+            sock.close()
+            for _ in range(60):
+                if tunnel.tap.snapshot():
+                    break
+                threading.Event().wait(0.05)
+            raw = build_pcap(tunnel.tap.snapshot()[0])
+        magic, major, minor = struct.unpack("<IHH", raw[:8])
+        self.assertEqual(magic, 0xa1b2c3d4)
+        self.assertEqual((major, minor), (2, 4))
+        # LINKTYPE_RAW: no invented Ethernet layer pretending a capture
+        # point existed.
+        self.assertEqual(struct.unpack("<I", raw[20:24])[0], 101)
+        self.assertIn(b"hello wireshark", raw)
+        self.assertIn(b"HELLO WIRESHARK", raw)
+
+    def test_the_pcap_uses_the_address_the_implant_reported(self):
+        # The implant's own source address for the target connection comes
+        # back in the dialect's reply, so the file is labelled with the
+        # four-tuple of the leg this server never sees.
+        with _Tunnel(tap=True) as tunnel, _Echo() as echo:
+            sock, _ = tunnel.connect(echo.address)
+            self.addCleanup(sock.close)
+            sock.sendall(b"x")
+            sock.recv(16)
+            sock.close()
+            for _ in range(60):
+                if tunnel.tap.snapshot():
+                    break
+                threading.Event().wait(0.05)
+            entry = tunnel.tap.snapshot()[0]
+        self.assertIsNotNone(entry["bound"], "the bound address was not kept")
+        self.assertEqual(entry["bound"][0], "127.0.0.1")
+        self.assertGreater(entry["bound"][1], 0)
 
 
 if __name__ == "__main__":

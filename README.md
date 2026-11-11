@@ -110,6 +110,12 @@ authorisation note below would be the only thing that had stopped it.
 space, warns on start-up, and says so in the ledger. Refusals are recorded as
 `target-outside-the-lab`.
 
+**The relayed payload is not captured by default.** `--tap` captures a
+bounded sample of it, holds it in memory, shows it behind a standing red
+warning and offers it as a reconstructed pcap — and it is a decision about
+somebody's network rather than a convenience. It never reaches the ledger.
+See [the dashboard](docs/dashboard.md).
+
 ```
 ./run-tests.sh
 ```

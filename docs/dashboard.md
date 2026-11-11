@@ -75,6 +75,44 @@ pane holds everything a detection gets. Nothing in it is invented — the
 server does not know what hostname the implant dialled or how many bytes a
 proxy counted, so those stay `?` rather than being guessed at.
 
+### The payload tap, and the four lines that make it defensible
+
+**Off unless `server.py --tap` says so**, because the relays carry the real
+traffic of the network under test. With it on:
+
+| | |
+|---|---|
+| **Bounded** | the first 4 KiB and last 1 KiB of each direction, of the last eight sessions. A row says when it is showing only part of a chunk, because a hex dump that quietly stops is one somebody will trust. The session also reports how many bytes were *not* kept. |
+| **In memory only** | never written to the ledger. That file is the one attached to a report and it stays quotable; a test asserts a payload string never reaches it. |
+| **Loud** | a red banner sits at the top of every page for as long as the tap is on, and cannot be scrolled away from. |
+| **Said out loud at start-up** | the server logs a warning and the ledger's `server-start` line carries `payload_tap=on`. |
+
+The reason to have it is a purple-team demonstration: "the credentials went
+over this tunnel in clear" lands differently when the blue team can read
+them. The reason to keep it off otherwise is that it is somebody's traffic.
+
+### The reconstructed pcap
+
+`GET /api/pcap?session=3` builds the tapped session into a pcap file a blue
+team can open in Wireshark and lay next to its own capture.
+
+**The framing is reconstructed, not captured**, and the filename says
+`RECONSTRUCTED` so the next person to open it cannot mistake it for sensor
+evidence.
+
+| Real | Invented |
+|---|---|
+| the payload bytes and their order | the IP and TCP headers |
+| the chunk boundaries | the sequence and acknowledgement numbers |
+| the time this server relayed each chunk | a three-way handshake at the front and a FIN at the end, so it opens as a conversation rather than loose segments |
+| the four-tuple — the implant's own source address for the target connection comes back in the dialect's reply, so the file is labelled with the addresses of the leg this server never sees | |
+
+Written as `LINKTYPE_RAW`, so there is no fake Ethernet layer implying a
+capture point that never existed. Verified rather than assumed: `capinfos`
+reads it as Raw IP, `tshark` dissects every packet with all IP and TCP
+checksums good, and the HTTP dissector reassembles the request — headers
+included.
+
 ### The scan, which is the dialect's native operation
 
 The protocol supports `CONNECT` and nothing else, so a TCP connect sweep is
@@ -353,6 +391,8 @@ than a quarter away from the running mean.
 | `POST /api/ingest` | `{"source", "label", "severity", "at"}` — any detection, any tool |
 | `POST /api/scan` | `{"targets": "10.0.0.0/28", "ports": "445,3389"}` |
 | `GET /api/scan` | progress and findings of the sweep in flight |
+| `GET /api/tap` | the tapped payload of recent sessions; empty unless `--tap` |
+| `GET /api/pcap?session=N` | that session as a reconstructed pcap |
 | `GET /api/debrief` | the run as one markdown file |
 
 On a `--dashboard-view` port every `POST` except `/api/ingest` answers `403`.

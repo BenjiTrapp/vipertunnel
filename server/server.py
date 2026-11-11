@@ -105,6 +105,13 @@ _PAIR_TIMEOUT = 30.0
 # be a capture of anybody's traffic.
 _SNIFF = 512
 
+# The raw tap, which is off unless `--tap` says otherwise. Bounded head and
+# tail per direction: enough to show what crossed and to rebuild a readable
+# capture, and far short of keeping the stream.
+_TAP_HEAD = 4096
+_TAP_TAIL = 1024
+_TAP_SESSIONS = 8
+
 # Per-second volume buckets kept per host, so a closed session still has a
 # shape on the timeline.
 _VOLUME_SECONDS = 3600
@@ -294,20 +301,57 @@ class StreamMeter(object):
     bytes per second in each direction and keeps the first few hundred bytes
     long enough to name the protocol.
 
-    **It is not a capture.** The sniff buffer is bounded at %d bytes per
-    direction and is discarded once the summary is made; the payload itself
-    is never stored, never written to the ledger and never sent to the
-    browser. That traffic belongs to the network under test.
-    """ % _SNIFF
+    **With `tap` off -- the default -- it is not a capture.** The sniff
+    buffer is bounded at %d bytes per direction and is discarded once the
+    summary is made; the payload itself is never stored, never written to the
+    ledger and never sent to the browser.
 
-    def __init__(self):
+    With `tap` on it *is* a capture, of a bounded kind: the first %d bytes
+    and the last %d of each direction, held in memory for the last few
+    sessions. That is a deliberate decision about somebody's network and the
+    dashboard says so in its header the whole time it is on.
+    """ % (_SNIFF, _TAP_HEAD, _TAP_TAIL)
+
+    def __init__(self, tap=False):
         self.out_bytes = 0
         self.in_bytes = 0
         self.buckets = {}                  # epoch second -> [out, in]
+        self.tap = tap
         self._out_head = bytearray()
         self._in_head = bytearray()
         self._summary = None
         self._lock = threading.Lock()
+        # Chunk records for the tap, as `[wall time, direction, bytes]`.
+        # Chunk boundaries and their timing are the interesting part, so
+        # these are kept as records rather than flattened into one blob.
+        self._head = []
+        self._tail = []
+        self._head_size = {0: 0, 1: 0}
+        self._tail_size = 0
+
+    def _record(self, index, chunk):
+        if not self.tap:
+            return
+        with self._lock:
+            if self._head_size[index] < _TAP_HEAD:
+                room = _TAP_HEAD - self._head_size[index]
+                self._head.append([time.time(), index, bytes(chunk[:room])])
+                self._head_size[index] += min(len(chunk), room)
+                if len(chunk) <= room:
+                    return
+                chunk = chunk[room:]
+            self._tail.append([time.time(), index, bytes(chunk[-_TAP_TAIL:])])
+            self._tail_size += len(self._tail[-1][2])
+            while self._tail_size > _TAP_TAIL * 2 and len(self._tail) > 1:
+                self._tail_size -= len(self._tail.pop(0)[2])
+
+    def records(self):
+        """Head records, then tail, with a marker if bytes went missing."""
+        with self._lock:
+            head, tail = list(self._head), list(self._tail)
+            dropped = (self.out_bytes + self.in_bytes
+                       - sum(len(r[2]) for r in head + tail))
+        return head, tail, max(0, dropped)
 
     def _bucket(self, index, count):
         second = int(time.time())
@@ -323,12 +367,14 @@ class StreamMeter(object):
         if len(self._out_head) < _SNIFF:
             self._out_head += chunk[:_SNIFF - len(self._out_head)]
         self._bucket(0, len(chunk))
+        self._record(0, chunk)
 
     def from_target(self, chunk):
         self.in_bytes += len(chunk)
         if len(self._in_head) < _SNIFF:
             self._in_head += chunk[:_SNIFF - len(self._in_head)]
         self._bucket(1, len(chunk))
+        self._record(1, chunk)
 
     @property
     def summary(self):
@@ -568,6 +614,31 @@ class _Capture(object):
         }
 
 
+class TapLog(object):
+    """The last few sessions' payload, when `--tap` is on.
+
+    Separate from the ledger on purpose. The ledger is the artefact a
+    finding cites and it stays small, clean and quotable; this is somebody's
+    actual traffic and belongs in memory for the length of a demonstration,
+    not in a file that gets attached to a report.
+    """
+
+    def __init__(self, limit=_TAP_SESSIONS):
+        self._limit = limit
+        self._taps = []
+        self._lock = threading.Lock()
+
+    def add(self, entry):
+        with self._lock:
+            self._taps.append(entry)
+            if len(self._taps) > self._limit:
+                del self._taps[:len(self._taps) - self._limit]
+
+    def snapshot(self):
+        with self._lock:
+            return list(reversed(self._taps))
+
+
 class SessionBook(object):
     """The relay sessions carrying traffic right now.
 
@@ -578,9 +649,10 @@ class SessionBook(object):
 
     _ids = itertools.count(1)
 
-    def __init__(self):
+    def __init__(self, tap=False):
         self._open = {}
         self._lock = threading.Lock()
+        self._tap = tap
         # Closed sessions leave their per-second volume behind, keyed by
         # implant host, so a session that ended five minutes ago still has a
         # shape on the timeline rather than vanishing from it.
@@ -596,7 +668,12 @@ class SessionBook(object):
             "relay_port": relay_port,
             "opened": time.time(),
             "started": time.monotonic(),
-            "meter": StreamMeter(),
+            "meter": StreamMeter(tap=self._tap),
+            # Filled in from the dialect's reply: the address the implant's
+            # own socket got for the target connection. With it a capture
+            # can be rebuilt with the real four-tuple of the leg this server
+            # never sees.
+            "bound": None,
         }
         with self._lock:
             self._open[entry["id"]] = entry
@@ -701,6 +778,23 @@ class RelayBroker(object):
             return sock, port
         finally:
             listener.close()
+
+
+def _tap_entry(entry):
+    """Freeze one session's tapped payload for the tap log."""
+    head, tail, dropped = entry["meter"].records()
+    return {
+        "id": entry["id"],
+        "peer": entry["peer"],
+        "target": "%s:%d" % (entry["host"], entry["port"]),
+        "bound": entry["bound"],
+        "opened": entry["opened"],
+        "summary": entry["meter"].summary,
+        "out_bytes": entry["meter"].out_bytes,
+        "in_bytes": entry["meter"].in_bytes,
+        "dropped": dropped,
+        "records": head + tail,
+    }
 
 
 class Phases(object):
@@ -879,6 +973,7 @@ class OperatorHandler(socketserver.BaseRequestHandler):
         capture.finish("carried")
         client.sessions += 1
         entry = self.server.sessions.open(client, host, port, relay_port)
+        entry["bound"] = bound
         ledger.record("session-open", host=host, port=port,
                       peer=client.peer)
         self._reply(operator, _RFC_OK, bound[0], bound[1])
@@ -887,6 +982,8 @@ class OperatorHandler(socketserver.BaseRequestHandler):
         finally:
             meter = entry["meter"]
             self.server.sessions.close(entry)
+            if self.server.tap is not None and meter.tap:
+                self.server.tap.add(_tap_entry(entry))
             # The volume and the protocol belong in the ledger: they are the
             # facts a volume-based detection would have had, and the file is
             # what a finding cites. The payload itself is never recorded.
@@ -1057,7 +1154,7 @@ class OperatorServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
 
     def __init__(self, address, fleet, broker, sessions, ledger,
-                 credentials, client_credentials, wire, guard):
+                 credentials, client_credentials, wire, guard, tap=None):
         self.fleet = fleet
         self.broker = broker
         self.sessions = sessions
@@ -1066,6 +1163,7 @@ class OperatorServer(socketserver.ThreadingTCPServer):
         self.client_credentials = client_credentials
         self.wire = wire
         self.guard = guard
+        self.tap = tap
         super(OperatorServer, self).__init__(address, OperatorHandler)
 
 
@@ -1191,6 +1289,17 @@ def main(argv=None):
                              "being able to change the run. It can still "
                              "POST to /api/ingest, which is the point of "
                              "having it.")
+    parser.add_argument("--tap", action="store_true",
+                        help="CAPTURE THE RELAYED PAYLOAD. Off by default "
+                             "and a decision about somebody's network: the "
+                             "relays carry the real traffic of the network "
+                             "under test. With this on, the first %d bytes "
+                             "and last %d of each direction of the last %d "
+                             "sessions are held in memory, shown in the "
+                             "dashboard behind a standing warning, and "
+                             "downloadable as a reconstructed pcap. Never "
+                             "written to the ledger."
+                             % (_TAP_HEAD, _TAP_TAIL, _TAP_SESSIONS))
     parser.add_argument("--allow-public", action="store_true",
                         help="permit relaying to addresses outside the "
                              "private ranges, loopback and link-local. OFF "
@@ -1216,8 +1325,9 @@ def main(argv=None):
     ledger = Ledger(args.ledger)
     knob = Knob(args.keepalive)
     fleet = Fleet(ledger)
-    sessions = SessionBook()
+    sessions = SessionBook(tap=args.tap)
     wire = WireLog()
+    tap = TapLog() if args.tap else None
     guard = LabGuard(args.allow_public)
     phases = Phases(ledger)
     broker = RelayBroker(args.bind, ledger)
@@ -1238,15 +1348,20 @@ def main(argv=None):
 
     operator = OperatorServer(("127.0.0.1", args.socks), fleet, broker,
                               sessions, ledger, credentials,
-                              client_credentials, wire, guard)
+                              client_credentials, wire, guard, tap)
 
     ledger.record("server-start", command_port=args.port,
                   socks_port=args.socks, keepalive=int(args.keepalive),
                   targets="anywhere" if args.allow_public else "lab_only",
+                  payload_tap="on" if args.tap else "off",
                   expected_shape=knob.shape.replace(" ", "_"))
     LOG.info("keep-alive %.0fs means: %s", args.keepalive, knob.shape)
     if args.allow_public:
         LOG.warning("--allow-public: this will relay to routable addresses")
+    if args.tap:
+        LOG.warning("--tap: the relayed payload is being captured. That is "
+                    "the real traffic of the network under test; keep it "
+                    "inside the lab and off the report.")
 
     threads = [
         threading.Thread(target=_serve_clients,
@@ -1262,7 +1377,7 @@ def main(argv=None):
             ("127.0.0.1", args.dashboard), fleet, sessions, knob, ledger,
             socks_port=args.socks, command_port=args.port,
             socks_credentials=credentials, wire=wire, guard=guard,
-            phases=phases)
+            phases=phases, tap=tap)
         threads.append(threading.Thread(target=board.serve_forever,
                                         name="dashboard", daemon=True))
         LOG.info("dashboard on http://127.0.0.1:%d -- out of band, and a "
@@ -1277,7 +1392,7 @@ def main(argv=None):
             ("127.0.0.1", args.dashboard_view), fleet, sessions, knob, ledger,
             socks_port=args.socks, command_port=args.port,
             socks_credentials=credentials, wire=wire, guard=guard,
-            phases=phases, marks=board.marks, readonly=True)
+            phases=phases, tap=tap, marks=board.marks, readonly=True)
         threads.append(threading.Thread(target=view.serve_forever,
                                         name="dashboard-view", daemon=True))
         LOG.info("read-only view on http://127.0.0.1:%d -- for the blue "

@@ -342,6 +342,63 @@ b { color: var(--ink); }
 .chart .mark-high { stroke: var(--dead); fill: var(--dead); }
 .chart .mark { stroke-width: 2; }
 
+/* -- the payload tap ------------------------------------------------------- */
+
+/* The warning is deliberately the loudest thing on the page, fixed to the
+ * top and impossible to scroll away from. The tap shows real traffic from a
+ * real network, and an interface that let that slip out of mind would be
+ * the worst thing in this repository. */
+.tap-warning {
+  position: sticky;
+  top: 0;
+  z-index: 70;
+  background: var(--dead);
+  color: #07080f;
+  font-family: "Orbitron", sans-serif;
+  font-size: 11px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  text-align: center;
+  padding: 7px 16px;
+  line-height: 1.5;
+  box-shadow: 0 0 calc(24px * var(--bloom)) rgba(255, 43, 74, .6);
+}
+
+#tap-pick {
+  max-width: 320px;
+  background: var(--panel2);
+  color: var(--ink2);
+}
+.tap-row {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 2px 12px;
+  padding: 6px 0 6px 10px;
+  border-bottom: 1px solid var(--grid);
+  border-left: 2px solid var(--rx);
+}
+.tap-row.in { border-left-color: var(--tx); }
+.tap-meta {
+  font-family: "Orbitron", sans-serif;
+  font-size: 9px;
+  letter-spacing: .1em;
+  color: var(--rx);
+  padding-top: 3px;
+}
+.tap-row.in .tap-meta { color: var(--tx); }
+.tap-text {
+  font-size: 12.5px;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.tap-hex {
+  grid-column: 2;
+  font-size: 11px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
 /* -- sessions -------------------------------------------------------------- */
 
 .session {

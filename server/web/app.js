@@ -80,6 +80,7 @@ function stream() {
         entry.event === "target-refused-by-client") {
       renderWire();
     }
+    if (entry.event === "session-close") renderTap();
   };
 }
 
@@ -895,6 +896,76 @@ async function renderScan() {
   }
 }
 
+/* -- the payload tap ------------------------------------------------------- */
+
+/* Shown only when the server was started with --tap, and then with a
+ * standing warning at the top of the page. This is somebody's real traffic;
+ * the interface should never let that slip out of mind. */
+let tapSessions = [];
+
+async function renderTap() {
+  const on = model.server && model.server.tap;
+  el("tap-warning").classList.toggle("hidden", !on);
+  el("tap-panel").classList.toggle("hidden", !on);
+  if (!on) return;
+
+  const answer = await (await fetch("/api/tap")).json();
+  tapSessions = answer.sessions || [];
+  el("tap-count").textContent = tapSessions.length;
+
+  const pick = el("tap-pick");
+  const chosen = pick.value;
+  pick.textContent = "";
+  for (const session of tapSessions) {
+    const option = document.createElement("option");
+    option.value = session.id;
+    option.textContent = `#${session.id} ${session.target} · ` +
+      `${bytes(session.out_bytes)}/${bytes(session.in_bytes)}`;
+    pick.appendChild(option);
+  }
+  if (chosen && tapSessions.some((s) => String(s.id) === chosen)) {
+    pick.value = chosen;
+  }
+  drawTap();
+}
+
+function drawTap() {
+  const host = el("tap");
+  const session = tapSessions.find(
+    (s) => String(s.id) === el("tap-pick").value) || tapSessions[0];
+  host.textContent = "";
+  el("tap-pcap").href = session ? `/api/pcap?session=${session.id}` : "#";
+  if (!session) {
+    host.innerHTML = '<p class="empty">No session has carried payload yet.</p>';
+    return;
+  }
+
+  const head = document.createElement("div");
+  head.className = "wire-head";
+  head.innerHTML =
+    `<b>${escapeText(session.peer)}</b> → ${escapeText(session.target)} · ` +
+    `<span class="rx">→ ${bytes(session.out_bytes)}</span> ` +
+    `<span class="tx">← ${bytes(session.in_bytes)}</span> · ` +
+    `<span class="k">${escapeText(session.summary)}</span>` +
+    (session.dropped
+      ? ` · <span class="bad">${bytes(session.dropped)} not kept</span>` : "");
+  host.appendChild(head);
+
+  for (const row of session.rows) {
+    const line = document.createElement("div");
+    line.className = "tap-row " +
+      (row.direction === "to-target" ? "out" : "in");
+    const arrow = row.direction === "to-target" ? "→" : "←";
+    const cut = row.shown < row.bytes
+      ? ` <span class="k">… first ${row.shown} of ${row.bytes} B</span>` : "";
+    line.innerHTML =
+      `<div class="tap-meta">${arrow} ${bytes(row.bytes)}</div>` +
+      `<div class="tap-text">${escapeText(row.text)}</div>` +
+      `<div class="tap-hex">${escapeText(row.hex)}${cut}</div>`;
+    host.appendChild(line);
+  }
+}
+
 /* -- helpers --------------------------------------------------------------- */
 
 function duration(seconds) {
@@ -1019,6 +1090,8 @@ el("ingest").onsubmit = async (event) => {
   poll();
 };
 
+el("tap-pick").onchange = drawTap;
+
 el("theme").onclick = () => {
   const root = document.documentElement;
   const next = root.dataset.theme === "grid" ? "report" : "grid";
@@ -1035,4 +1108,5 @@ poll();
 stream();
 renderWire();
 renderScan();        // a scan from before this tab was opened still counts
+setTimeout(renderTap, 400);   // needs /api/state to know whether tap is on
 setInterval(poll, POLL_MS);

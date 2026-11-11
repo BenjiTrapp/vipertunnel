@@ -7,6 +7,11 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+<div id="tap-warning" class="tap-warning hidden">
+  payload tap is ON — the relays are carrying the real traffic of the network
+  under test, and this page is showing it. Keep it inside the lab and off the
+  report.
+</div>
 <div class="wrap">
 
 <header class="bar">
@@ -223,6 +228,27 @@
     </p>
   </section>
 </div>
+
+<!-- Only ever shown when --tap is on; see the warning at the top. -->
+<section class="panel m hidden" id="tap-panel">
+  <div class="panel-head">
+    <h2>payload tap</h2>
+    <span class="count" id="tap-count">0</span>
+    <select id="tap-pick" class="ghost"></select>
+    <a id="tap-pcap" class="ghost" href="#">pcap (reconstructed)</a>
+  </div>
+  <p class="d">The bytes the relay actually carried, newest session first.
+    Bounded: the first 4 KiB and last 1 KiB of each direction, of the last
+    eight sessions, in memory only. Never written to the ledger — that file
+    is the one a finding cites and it stays quotable.</p>
+  <p class="d">The pcap's <b>framing is reconstructed, not captured</b>. Real:
+    the bytes, their order, their chunk boundaries, the time this server
+    relayed each one, and the four-tuple — the implant's own source address
+    comes back in the dialect's reply. Invented: the IP and TCP headers, the
+    sequence numbers, and a handshake at the front so it opens as a
+    conversation.</p>
+  <div id="tap"></div>
+</section>
 
 <footer>
   Every value here comes from events that went to the ledger file as well;

@@ -200,6 +200,91 @@ def cadence(arrivals, now=None):
     return out
 
 
+def _checksum(data):
+    if len(data) % 2:
+        data += b"\x00"
+    total = 0
+    for index in range(0, len(data), 2):
+        total += (data[index] << 8) + data[index + 1]
+    while total >> 16:
+        total = (total & 0xffff) + (total >> 16)
+    return (~total) & 0xffff
+
+
+def _ipv4_tcp(src, src_port, dst, dst_port, seq, ack, flags, payload):
+    """One IPv4 + TCP packet, checksums and all."""
+    tcp_length = 20 + len(payload)
+    header = struct.pack(
+        ">HHIIBBHHH", src_port, dst_port, seq, ack,
+        5 << 4,                       # data offset 5 words, no options
+        flags, 65535, 0, 0)
+    pseudo = (socket.inet_aton(src) + socket.inet_aton(dst)
+              + struct.pack(">BBH", 0, 6, tcp_length))
+    tcp_sum = _checksum(pseudo + header + payload)
+    header = header[:16] + struct.pack(">H", tcp_sum) + header[18:]
+    total = 20 + tcp_length
+    ip = struct.pack(">BBHHHBBH", 0x45, 0, total, 0, 0x4000, 64, 6, 0)
+    ip += socket.inet_aton(src) + socket.inet_aton(dst)
+    ip = ip[:10] + struct.pack(">H", _checksum(ip)) + ip[12:]
+    return ip + header + payload
+
+
+def build_pcap(tap):
+    """Rebuild one tapped session as a pcap a blue team can open.
+
+    **The framing is reconstructed, not captured**, and the filename and the
+    documentation both say so. What is real: the payload bytes, their order,
+    their chunk boundaries, the time this server relayed each chunk, and the
+    four-tuple -- the implant's own source address for the target connection
+    comes back in the dialect's reply, so the conversation is labelled with
+    the addresses of the leg this server never sees. What is invented: the
+    IP and TCP headers, the sequence numbers, and a three-way handshake at
+    the front so a reader sees a session rather than loose segments.
+
+    Written as LINKTYPE_RAW, so there is no fake Ethernet layer pretending a
+    capture point existed.
+    """
+    implant_host = tap["peer"].rsplit(":", 1)[0]
+    bound = tap.get("bound") or (implant_host, 0)
+    src, src_port = bound[0], int(bound[1])
+    dst_host, _, dst_port = tap["target"].rpartition(":")
+    dst_port = int(dst_port)
+
+    records = tap["records"]
+    start = records[0][0] if records else tap["opened"]
+    out = [struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 65535, 101)]
+
+    def frame(when, packet):
+        out.append(struct.pack("<IIII", int(when), int((when % 1) * 1e6),
+                               len(packet), len(packet)) + packet)
+
+    # A synthetic handshake, so the file opens as a conversation.
+    seq = {0: 1, 1: 1}
+    frame(start, _ipv4_tcp(src, src_port, dst_host, dst_port,
+                           0, 0, 0x02, b""))                     # SYN
+    frame(start, _ipv4_tcp(dst_host, dst_port, src, src_port,
+                           0, 1, 0x12, b""))                     # SYN-ACK
+    frame(start, _ipv4_tcp(src, src_port, dst_host, dst_port,
+                           1, 1, 0x10, b""))                     # ACK
+
+    for when, direction, data in records:
+        if not data:
+            continue
+        if direction == 0:
+            packet = _ipv4_tcp(src, src_port, dst_host, dst_port,
+                               seq[0], seq[1], 0x18, data)
+        else:
+            packet = _ipv4_tcp(dst_host, dst_port, src, src_port,
+                               seq[1], seq[0], 0x18, data)
+        frame(when, packet)
+        seq[direction] += len(data)
+
+    last = records[-1][0] if records else start
+    frame(last, _ipv4_tcp(src, src_port, dst_host, dst_port,
+                          seq[0], seq[1], 0x11, b""))            # FIN-ACK
+    return b"".join(out)
+
+
 class Marks(object):
     """Events from outside this program, on the same axis as the truth.
 
@@ -448,7 +533,7 @@ class Dashboard(ThreadingHTTPServer):
     def __init__(self, address, fleet, sessions, knob, ledger,
                  socks_port, command_port, socks_credentials=None,
                  wire=None, guard=None, phases=None, marks=None,
-                 readonly=False):
+                 tap=None, readonly=False):
         self.fleet = fleet
         self.sessions = sessions
         self.knob = knob
@@ -459,6 +544,7 @@ class Dashboard(ThreadingHTTPServer):
         self.wire = wire
         self.guard = guard
         self.phases = phases
+        self.tap = tap
         # Two dashboards on one run share the marks, so the blue team's
         # read-only view shows the same ingested detections the operator's
         # does rather than an empty lane.
@@ -533,6 +619,7 @@ class Dashboard(ThreadingHTTPServer):
                 "socks_auth": self.socks_credentials is not None,
                 "lab_only": bool(self.guard and not self.guard.allow_public),
                 "readonly": self.readonly,
+                "tap": self.tap is not None,
                 "started": self.started,
                 "uptime_seconds": int(time.time() - self.started),
                 "now": time.time(),
@@ -581,6 +668,44 @@ class Dashboard(ThreadingHTTPServer):
 
     def wire_captures(self):
         return self.wire.snapshot() if self.wire else []
+
+    def taps(self):
+        """The tapped sessions, rendered for reading rather than for bytes."""
+        if self.tap is None:
+            return []
+        out = []
+        for entry in self.tap.snapshot():
+            rows = []
+            for when, direction, data in entry["records"]:
+                # Truncated for reading, and the row says so: a hex dump
+                # that quietly stops is a hex dump somebody will trust.
+                rows.append({
+                    "at": when,
+                    "direction": "to-target" if direction == 0 else "from-target",
+                    "bytes": len(data),
+                    "shown": min(len(data), 256),
+                    "hex": " ".join("%02x" % byte for byte in data[:256]),
+                    "text": "".join(chr(b) if 32 <= b < 127 else "."
+                                    for b in data[:512]),
+                })
+            out.append({
+                "id": entry["id"], "peer": entry["peer"],
+                "target": entry["target"], "opened": entry["opened"],
+                "summary": entry["summary"],
+                "out_bytes": entry["out_bytes"],
+                "in_bytes": entry["in_bytes"],
+                "dropped": entry["dropped"],
+                "rows": rows[:80],
+            })
+        return out
+
+    def pcap(self, session_id):
+        if self.tap is None:
+            return None
+        for entry in self.tap.snapshot():
+            if entry["id"] == int(session_id):
+                return build_pcap(entry)
+        return None
 
     def fingerprint(self, force=False):
         """Probe our own command port the way a researcher's scanner did.
@@ -1111,6 +1236,31 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json({"captures": self.server.wire_captures()})
         if route == "/api/scan":
             return self._json(self.server.scan.status())
+        if route == "/api/tap":
+            return self._json({"sessions": self.server.taps()})
+        if route == "/api/pcap":
+            query = self.path.partition("?")[2]
+            wanted = dict(piece.split("=", 1) for piece in query.split("&")
+                          if "=" in piece).get("session", "0")
+            try:
+                body = self.server.pcap(wanted)
+            except (TypeError, ValueError):
+                body = None
+            if not body:
+                return self._json({"error": "no tapped session with that id; "
+                                            "--tap must be on"}, 404)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.tcpdump.pcap")
+            self.send_header("Content-Length", str(len(body)))
+            # The name carries the caveat, because a file called
+            # "session-3.pcap" would be treated as sensor evidence by the
+            # next person to open it.
+            self.send_header(
+                "Content-Disposition",
+                'attachment; filename="vipertunnel-session%s-'
+                'RECONSTRUCTED.pcap"' % wanted)
+            self.end_headers()
+            return self.wfile.write(body)
         if route == "/api/debrief":
             body = self.server.debrief().encode("utf-8")
             self.send_response(200)
