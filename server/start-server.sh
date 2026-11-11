@@ -18,6 +18,11 @@
 # connection, the original client exits rather than reconnecting. A cadence
 # other than ~120s has to come from the client's --timeout, which is a
 # deviation from the family and is labelled as one.
+#
+# DASHBOARD=8787 adds an operator view on loopback. It is off by default and
+# out of band: a listening HTTP port is a trait this family does not have, so
+# a scan taken with it up reports this tool rather than the family. Reach it
+# over an SSH forward, not by exposing it.
 
 set -euo pipefail
 
@@ -27,6 +32,7 @@ BIND="${BIND:-0.0.0.0}"
 PORT="${PORT:-443}"
 SOCKS="${SOCKS:-1080}"
 KEEPALIVE="${KEEPALIVE:-0}"
+DASHBOARD="${DASHBOARD:-}"
 LEDGER="${LEDGER:-$HERE/server-ledger.log}"
 
 PYTHON="${PYTHON:-python3}"
@@ -52,6 +58,12 @@ case "$KEEPALIVE" in
        fi ;;
 esac
 
+if [ -n "$DASHBOARD" ]; then
+    BOARD="http://127.0.0.1:${DASHBOARD}   (loopback only -- reach it over an SSH forward)"
+else
+    BOARD="off   (DASHBOARD=8787 turns it on)"
+fi
+
 cat <<BANNER
 tunnel server
   implants   ${BIND}:${PORT}
@@ -59,16 +71,22 @@ tunnel server
   keep-alive ${KEEPALIVE}s
   expect     ${SHAPE}
   ledger     ${LEDGER}
+  dashboard  ${BOARD}
 
 Ground truth goes to the ledger. Compare a detection's report against it
 rather than against the detection's own timestamps -- a field named for a
 sleep interval or a jitter does not always hold one.
 BANNER
 
-exec "$PYTHON" "$HERE/server.py" \
-    --bind "$BIND" \
-    --port "$PORT" \
-    --socks "$SOCKS" \
-    --keepalive "$KEEPALIVE" \
-    --ledger "$LEDGER" \
-    "$@"
+ARGS=(
+    --bind "$BIND"
+    --port "$PORT"
+    --socks "$SOCKS"
+    --keepalive "$KEEPALIVE"
+    --ledger "$LEDGER"
+)
+if [ -n "$DASHBOARD" ]; then
+    ARGS+=(--dashboard "$DASHBOARD")
+fi
+
+exec "$PYTHON" "$HERE/server.py" "${ARGS[@]}" "$@"

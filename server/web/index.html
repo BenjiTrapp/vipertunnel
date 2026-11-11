@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="scope">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vipertunnel · operator</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="bar">
+  <h1>vipertunnel <span class="sub">operator view</span></h1>
+  <dl class="facts">
+    <dt>command</dt><dd id="fact-command">—</dd>
+    <dt>operator</dt><dd id="fact-socks">—</dd>
+    <dt>up</dt><dd id="fact-uptime">—</dd>
+    <dt>feed</dt><dd id="fact-feed" class="feed-down">connecting</dd>
+  </dl>
+  <button id="theme" class="ghost" title="Scope / Report">theme</button>
+</header>
+
+<!-- The verdict, which is the only thing on this page a finding quotes. -->
+<section class="verdict" id="verdict">
+  <div class="knob">
+    <span class="knob-label">keep-alive</span>
+    <div class="switch" role="group" aria-label="keep-alive">
+      <button data-seconds="60" class="pos">60 s<em>held</em></button>
+      <button data-seconds="0" class="pos">0<em>cadence</em></button>
+    </div>
+    <label class="custom">
+      <input id="knob-custom" type="number" min="0" step="1" placeholder="s">
+      <button id="knob-set" class="ghost">set</button>
+    </label>
+  </div>
+  <div class="shape">
+    <p class="shape-line" id="shape-line">waiting for the server</p>
+    <p class="shape-why" id="shape-why"></p>
+  </div>
+  <div class="measured">
+    <div class="metric"><b id="m-conns">0</b><span>connections</span></div>
+    <div class="metric"><b id="m-mean">—</b><span>mean gap</span></div>
+    <div class="metric"><b id="m-cv">—</b><span>CV (jitter)</span></div>
+  </div>
+  <p class="measured-verdict" id="measured-verdict"></p>
+</section>
+
+<!-- The hero: one row per implant, time running left to right. -->
+<section class="panel timeline">
+  <div class="panel-head">
+    <h2>timeline</h2>
+    <div class="zoom" id="zoom">
+      <button data-span="0" class="on">fit</button>
+      <button data-span="300">5 m</button>
+      <button data-span="900">15 m</button>
+      <button data-span="3600">1 h</button>
+      <button data-span="21600">6 h</button>
+    </div>
+    <ul class="key">
+      <li><i class="k-command"></i>command connection</li>
+      <li><i class="k-keepalive"></i>keep-alive</li>
+      <li><i class="k-session"></i>relay session</li>
+      <li><i class="k-death"></i>channel died</li>
+    </ul>
+  </div>
+  <div id="chart" class="chart"></div>
+  <p class="empty" id="chart-empty">
+    Nothing has connected yet. Start the client against this server and the
+    first command connection appears here as a bar; a bar that keeps growing
+    is the held shape, bars that repeat are the cadence.
+  </p>
+</section>
+
+<div class="columns">
+
+  <section class="panel">
+    <div class="panel-head"><h2>fleet</h2><span class="count" id="fleet-count">0</span></div>
+    <table class="grid" id="fleet">
+      <thead><tr><th>implant</th><th>held</th><th>k/a</th><th>sess</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p class="empty" id="fleet-empty">No implant has a command connection open.</p>
+
+    <div class="panel-head sub-head"><h2>sessions</h2><span class="count" id="session-count">0</span></div>
+    <table class="grid" id="sessions">
+      <thead><tr><th>target</th><th>relay</th><th>via</th><th>age</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p class="empty" id="session-empty">
+      No relay is carrying traffic. Drive one with
+      <code>curl --socks5</code> on the operator port, or use the probe below.
+    </p>
+  </section>
+
+  <section class="panel">
+    <div class="tabs" id="tabs">
+      <button data-tab="events" class="on">events</button>
+      <button data-tab="proxy">what a proxy log shows</button>
+    </div>
+    <div class="tab-body" id="tab-events">
+      <ol class="feed" id="feed"></ol>
+    </div>
+    <div class="tab-body hidden" id="tab-proxy">
+      <p class="note">
+        Reconstructed from the ledger, in the shape a forward proxy would
+        have written it. This is the view a detection reads — compare its
+        report against the ledger file, not against this.
+      </p>
+      <pre class="proxylog" id="proxylog"></pre>
+    </div>
+  </section>
+
+</div>
+
+<section class="panel tools">
+  <div class="panel-head"><h2>tools</h2></div>
+  <div class="tool">
+    <h3>probe through the tunnel</h3>
+    <p class="note">
+      Speaks RFC 1928 to this server's own operator port, exactly as
+      <code>curl --socks5</code> would, so a probe that works proves the
+      whole path. Capped at 1 KiB out and 4 KiB back: it is a check, not a
+      transfer tool.
+    </p>
+    <form id="probe">
+      <input name="host" placeholder="host, as the implant sees it" required>
+      <input name="port" type="number" min="1" max="65535" value="80" required>
+      <input name="payload" placeholder="bytes to send (optional)">
+      <button type="submit">probe</button>
+    </form>
+    <output id="probe-out"></output>
+  </div>
+  <div class="tool">
+    <h3>mark the ledger</h3>
+    <p class="note">
+      A dated line in the same file as the ground truth — the marker you want
+      at the moment a detection fires.
+    </p>
+    <form id="note">
+      <input name="text" placeholder="e.g. SIEM alert 4411 fired" required>
+      <button type="submit">write</button>
+    </form>
+  </div>
+</section>
+
+<footer>
+  <p>
+    Loopback only, and out of band: a listening HTTP port is a trait this
+    family does not have, so a scan taken with this up reports the tool and
+    not the thing being emulated. Reach it over an SSH forward.
+  </p>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

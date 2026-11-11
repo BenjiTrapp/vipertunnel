@@ -23,6 +23,12 @@ Three sockets, and the first two are the ones a detection sees:
     translates between the RFC and the client's dialect, because the dialect
     has no version bytes, little-endian ports and inverted status codes.
 
+A fourth is optional and off by default: `--dashboard PORT` serves an
+operator view on loopback, described in `dashboard.py`. It is out of band on
+purpose -- a listening HTTP port is something this family does not have, so
+it would show up in a scan of the measurement host as a trait of the tool
+rather than of the family.
+
 ## The knob the measurement turns
 
 `--keepalive` is the experimental variable, and its effect is a step rather
@@ -44,6 +50,7 @@ allows and labels a deviation.
 """
 
 import argparse
+import itertools
 import logging
 import os
 import select
@@ -83,6 +90,12 @@ _RFC_CMD_UNSUPPORTED = 7
 _RELAY_CHUNK = 16384
 _PAIR_TIMEOUT = 30.0
 
+# The client's read deadline, which this server does not set and cannot
+# change. It is here because it is the threshold the keep-alive knob is
+# measured against: below it one connection is held, above it the client
+# reconnects on that period.
+_CLIENT_TIMEOUT = 120
+
 
 class Ledger(object):
     """Ground truth for the measurement. See the client's copy for the why."""
@@ -90,18 +103,76 @@ class Ledger(object):
     def __init__(self, path):
         self._path = path
         self._lock = threading.Lock()
+        self._watchers = []
+
+    def subscribe(self, watcher):
+        """Call `watcher(stamp, event, fields)` for every event from now on.
+
+        The dashboard watches here rather than tailing the file, so it reads
+        the same events the file gets rather than parsing back what was just
+        formatted. A watcher must not block: it is called on whichever thread
+        produced the event, including the one holding a client's socket.
+        """
+        with self._lock:
+            self._watchers.append(watcher)
 
     def record(self, event, **fields):
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         detail = " ".join("%s=%s" % (k, v) for k, v in sorted(fields.items()))
         line = "%s %s %s\n" % (stamp, event, detail)
         LOG.info("%s %s", event, detail)
+        with self._lock:
+            watchers = list(self._watchers)
+        for watcher in watchers:
+            # An observer is never worth the run: a dashboard that raises
+            # must not take a client's command connection down with it.
+            try:
+                watcher(stamp, event, fields)
+            except Exception as exc:                # pragma: no cover
+                LOG.debug("a ledger watcher raised: %s", exc)
         if not self._path:
             return
         with self._lock:
             with open(self._path, "a", encoding="utf-8") as handle:
                 handle.write(line)
                 handle.flush()
+
+
+class Knob(object):
+    """The measurement variable, held where several threads can read it.
+
+    The keep-alive interval used to be a local in the command loop, which
+    fixed the shape of a run at start-up. The dashboard can turn it mid-run,
+    so the value lives here and the loop reads it again on every pass -- the
+    step from "one held connection" to "a reconnect every ~120 s" then
+    happens inside one run, which is the cheapest way to see both shapes in
+    one timeline.
+    """
+
+    def __init__(self, seconds):
+        self._seconds = float(seconds)
+        self._lock = threading.Lock()
+
+    @property
+    def seconds(self):
+        with self._lock:
+            return self._seconds
+
+    def set(self, seconds):
+        seconds = float(seconds)
+        if seconds < 0:
+            raise ValueError("a keep-alive interval cannot be negative")
+        with self._lock:
+            previous, self._seconds = self._seconds, seconds
+        return previous
+
+    @property
+    def shape(self):
+        """What a proxy log will show at the current setting."""
+        if 0 < self._seconds < _CLIENT_TIMEOUT:
+            return "one held connection, no cadence"
+        return "a reconnect every ~%ds, which is the client's timeout" % (
+            _CLIENT_TIMEOUT,)
 
 
 def _recv_exactly(sock, count):
@@ -142,12 +213,20 @@ class Client(object):
     it is not atomic against another thread -- the lock is not decorative.
     """
 
+    _ids = itertools.count(1)
+
     def __init__(self, sock, peer, ledger):
         self.sock = sock
         self.peer = peer
         self.ledger = ledger
+        # A stable handle for the dashboard. The peer address is not one: the
+        # source port changes on every reconnect, which is the very thing the
+        # cadence measurement is watching.
+        self.id = next(Client._ids)
         self.opened = time.monotonic()
+        self.opened_wall = time.time()
         self.keepalives = 0
+        self.sessions = 0
         self._write = threading.Lock()
         self._alive = True
 
@@ -168,6 +247,8 @@ class Client(object):
         if _U16_LE.unpack(echo)[0] != 0:
             raise OSError("client answered a keep-alive with something else")
         self.keepalives += 1
+        self.ledger.record("keepalive", peer=self.peer,
+                           count=self.keepalives)
 
     def close(self):
         self._alive = False
@@ -179,6 +260,17 @@ class Client(object):
     @property
     def alive(self):
         return self._alive
+
+    def describe(self):
+        return {
+            "id": self.id,
+            "peer": self.peer,
+            "host": self.peer.rsplit(":", 1)[0],
+            "opened": self.opened_wall,
+            "held_seconds": int(time.monotonic() - self.opened),
+            "keepalives": self.keepalives,
+            "sessions": self.sessions,
+        }
 
 
 class Fleet(object):
@@ -220,6 +312,61 @@ class Fleet(object):
         with self._lock:
             return list(self._clients)
 
+    def find(self, client_id):
+        with self._lock:
+            for client in self._clients:
+                if client.id == client_id:
+                    return client
+        return None
+
+
+class SessionBook(object):
+    """The relay sessions carrying traffic right now.
+
+    Not needed by the protocol -- the server pairs by port and then forgets.
+    It exists so the dashboard can show what is open, and so a session can be
+    put on a timeline next to the command connection that announced it.
+    """
+
+    _ids = itertools.count(1)
+
+    def __init__(self):
+        self._open = {}
+        self._lock = threading.Lock()
+
+    def open(self, client, host, port, relay_port):
+        entry = {
+            "id": next(SessionBook._ids),
+            "client_id": client.id,
+            "peer": client.peer,
+            "host": host,
+            "port": port,
+            "relay_port": relay_port,
+            "opened": time.time(),
+            "started": time.monotonic(),
+        }
+        with self._lock:
+            self._open[entry["id"]] = entry
+        return entry
+
+    def close(self, entry):
+        with self._lock:
+            self._open.pop(entry["id"], None)
+
+    def snapshot(self):
+        now = time.monotonic()
+        with self._lock:
+            entries = list(self._open.values())
+        return [{
+            "id": e["id"],
+            "client_id": e["client_id"],
+            "peer": e["peer"],
+            "target": "%s:%d" % (e["host"], e["port"]),
+            "relay_port": e["relay_port"],
+            "opened": e["opened"],
+            "age_seconds": int(now - e["started"]),
+        } for e in sorted(entries, key=lambda e: e["id"])]
+
 
 class RelayBroker(object):
     """Hands a client a port to dial, and pairs what dials in with a session.
@@ -237,6 +384,7 @@ class RelayBroker(object):
         self.ledger = ledger
 
     def open_session(self, client):
+        """Return `(socket, port)` once the client has dialled back in."""
         listener = socket.socket()
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind((self._bind_host, 0))
@@ -249,7 +397,7 @@ class RelayBroker(object):
             sock, peer = listener.accept()
             self.ledger.record("relay-paired", port=port, peer="%s:%d" % peer)
             sock.settimeout(None)
-            return sock
+            return sock, port
         finally:
             listener.close()
 
@@ -287,7 +435,7 @@ class OperatorHandler(socketserver.BaseRequestHandler):
             return
 
         try:
-            relay = broker.open_session(client)
+            relay, relay_port = broker.open_session(client)
         except (OSError, socket.timeout) as exc:
             ledger.record("relay-failed", peer=client.peer, error=exc)
             self._reply(operator, _RFC_GENERAL_FAILURE)
@@ -307,12 +455,15 @@ class OperatorHandler(socketserver.BaseRequestHandler):
             relay.close()
             return
 
+        client.sessions += 1
+        entry = self.server.sessions.open(client, host, port, relay_port)
         ledger.record("session-open", host=host, port=port,
                       peer=client.peer)
         self._reply(operator, _RFC_OK, bound[0], bound[1])
         try:
             _bridge(operator, relay)
         finally:
+            self.server.sessions.close(entry)
             ledger.record("session-close", host=host, port=port)
             relay.close()
 
@@ -431,17 +582,18 @@ class OperatorServer(socketserver.ThreadingTCPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, fleet, broker, ledger,
+    def __init__(self, address, fleet, broker, sessions, ledger,
                  credentials, client_credentials):
         self.fleet = fleet
         self.broker = broker
+        self.sessions = sessions
         self.ledger = ledger
         self.credentials = credentials
         self.client_credentials = client_credentials
         super(OperatorServer, self).__init__(address, OperatorHandler)
 
 
-def _serve_clients(listener, fleet, keepalive, ledger, stop):
+def _serve_clients(listener, fleet, knob, ledger, stop):
     """Accept implants and keep each one's connection the way the knob says."""
 
     def hold(sock, peer):
@@ -449,6 +601,10 @@ def _serve_clients(listener, fleet, keepalive, ledger, stop):
         fleet.add(client)
         try:
             while not stop.is_set():
+                # Read the knob on every pass, not once: the dashboard can
+                # turn it mid-run, and a run that shows both shapes in one
+                # timeline is worth more than two runs that each show one.
+                keepalive = knob.seconds
                 if keepalive <= 0:
                     # Never send one. The client's read then times out and it
                     # reconnects, which is the cadence being measured.
@@ -469,9 +625,19 @@ def _serve_clients(listener, fleet, keepalive, ledger, stop):
                         # our client.
                         raise OSError("unsolicited bytes on the command channel")
                     continue
-                if stop.wait(keepalive):
-                    return
-                client.keepalive()
+                # Waiting in one-second slices rather than for the whole
+                # interval, so turning the knob down takes effect within a
+                # second instead of after the old interval has run out.
+                deadline = time.monotonic() + keepalive
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        client.keepalive()
+                        break
+                    if stop.wait(min(1.0, remaining)):
+                        return
+                    if knob.seconds != keepalive:
+                        break
         except OSError as exc:
             LOG.debug("client %s went away: %s", client.peer, exc)
         finally:
@@ -488,6 +654,18 @@ def _serve_clients(listener, fleet, keepalive, ledger, stop):
         sock.settimeout(None)
         threading.Thread(target=hold, args=(sock, peer),
                          name="client-%s:%d" % peer, daemon=True).start()
+
+
+def _dashboard_class():
+    # Imported late so the tunnel runs with the dashboard file absent, and
+    # resolved both ways because this file is both a script and a package
+    # module: run directly, `dashboard.py` sits beside it and is just
+    # `dashboard`; imported as part of the package it is `server.dashboard`.
+    try:
+        from .dashboard import Dashboard
+    except ImportError:
+        from dashboard import Dashboard
+    return Dashboard
 
 
 def main(argv=None):
@@ -523,6 +701,13 @@ def main(argv=None):
                         help="append an event line per client, keep-alive, "
                              "relay and session -- the ground truth to check "
                              "a detection's report against")
+    parser.add_argument("--dashboard", type=int, metavar="PORT",
+                        help="serve the operator dashboard on this port, "
+                             "loopback only. OFF by default and out of band: "
+                             "it is a listening port the family does not "
+                             "have, so it changes what a scan of this host "
+                             "reports. Reach it over an SSH forward rather "
+                             "than exposing it.")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args(argv)
 
@@ -539,7 +724,9 @@ def main(argv=None):
         return 2
 
     ledger = Ledger(args.ledger)
+    knob = Knob(args.keepalive)
     fleet = Fleet(ledger)
+    sessions = SessionBook()
     broker = RelayBroker(args.bind, ledger)
     stop = threading.Event()
 
@@ -557,23 +744,33 @@ def main(argv=None):
         client_credentials = (args.client_user, args.client_password or "")
 
     operator = OperatorServer(("127.0.0.1", args.socks), fleet, broker,
-                              ledger, credentials, client_credentials)
+                              sessions, ledger, credentials,
+                              client_credentials)
 
-    shape = ("one held connection, no cadence"
-             if 0 < args.keepalive < 120 else
-             "a reconnect every ~120s, which is the client's timeout")
     ledger.record("server-start", command_port=args.port,
                   socks_port=args.socks, keepalive=int(args.keepalive),
-                  expected_shape=shape.replace(" ", "_"))
-    LOG.info("keep-alive %.0fs means: %s", args.keepalive, shape)
+                  expected_shape=knob.shape.replace(" ", "_"))
+    LOG.info("keep-alive %.0fs means: %s", args.keepalive, knob.shape)
 
     threads = [
         threading.Thread(target=_serve_clients,
-                         args=(listener, fleet, args.keepalive, ledger, stop),
+                         args=(listener, fleet, knob, ledger, stop),
                          name="command", daemon=True),
         threading.Thread(target=operator.serve_forever, name="operator",
                          daemon=True),
     ]
+
+    board = None
+    if args.dashboard:
+        board = _dashboard_class()(
+            ("127.0.0.1", args.dashboard), fleet, sessions, knob, ledger,
+            socks_port=args.socks, command_port=args.port,
+            socks_credentials=credentials)
+        threads.append(threading.Thread(target=board.serve_forever,
+                                        name="dashboard", daemon=True))
+        LOG.info("dashboard on http://127.0.0.1:%d -- out of band, and a "
+                 "port this family does not have", args.dashboard)
+
     for thread in threads:
         thread.start()
 
@@ -584,6 +781,8 @@ def main(argv=None):
         LOG.info("stopping")
     finally:
         stop.set()
+        if board is not None:
+            board.shutdown()
         operator.shutdown()
         listener.close()
         for client in fleet.snapshot():
