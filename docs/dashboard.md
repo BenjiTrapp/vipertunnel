@@ -57,20 +57,21 @@ never worth the run.
 
 | Panel | What it answers |
 |---|---|
-| **Verdict** | what a proxy log will show at the current setting, and what it *actually* showed |
-| **Timeline** | one lane per implant host: command connections as bars, keep-alives as ticks, relay sessions as blocks, deaths as red marks |
+| **Cadence** | the coefficient of variation, display-sized: near zero is a machine on a timer, and anything else is not a cadence. Under it, the shape the knob predicts and the shape the gaps measured |
+| **Ticker** | command connections, mean gap and its standard deviation, implants connected, relays carrying, keep-alives sent, uptime |
+| **Timeline** | one lane per implant host: command connections as bars, keep-alives as amber ticks, relay sessions as bands, deaths as red marks |
+| **Ledger · live** | every event, the moment the file gets it |
+| **Reconstructed proxy log** | the same run as a forward proxy would have written it — the only part of this page a detection can see |
 | **Fleet** | which implants have a command connection open, for how long, and how many keep-alives and sessions each has carried |
 | **Sessions** | which relays are carrying traffic right now, to what target, over which five-digit port |
-| **Events** | the ledger, live |
-| **What a proxy log shows** | the same run reconstructed as a forward proxy would have written it — which is the only part of this page a detection can see |
 
-The last two next to each other are the point of the whole repository: the
-left pane holds everything that happened and the right pane holds everything
-a detection gets. Nothing in it is invented — the server does not know what
-hostname the implant dialled or how many bytes a proxy counted, so those stay
-`?` rather than being guessed at.
+The ledger and the proxy log sit side by side, and that is the point of the
+whole repository: the left pane holds everything that happened and the right
+pane holds everything a detection gets. Nothing in it is invented — the
+server does not know what hostname the implant dialled or how many bytes a
+proxy counted, so those stay `?` rather than being guessed at.
 
-### The verdict panel says two things, not one
+### The cadence panel says two things, not one
 
 The predicted shape comes from the knob. The measured one comes from the
 gaps. They do come apart, and the page says so when they do: **a relay
@@ -108,31 +109,66 @@ script served by `http.server`. The `Content-Security-Policy` is
 `default-src 'self'` — a dashboard for a lab tool should not be able to phone
 anywhere.
 
-Two palettes, switched with the `theme` button and remembered:
+**The fonts are in the repository**, in `server/web/fonts/`: Orbitron for
+titles and JetBrains Mono for everything else, latin subsets, 43 KB together,
+both under the SIL Open Font License. Fetching them from a font CDN would
+have broken the CSP, broken the no-install promise, and failed silently on a
+measurement host with no internet — which is most of them.
 
-- **`scope`** (the default) — dark, monospace, the timeline as the hero
-  element. For a second monitor during a run.
-- **`report`** — light and printable, the verdict first, controls hidden when
-  printed. For the screenshot that goes in the finding.
+Two themes, switched with the button in the corner and remembered:
 
-Three choices worth naming, because each follows from the domain rather than
-from taste:
+- **`grid`** (the default) — dark, grid-backed, neon-accented, with the
+  measured coefficient of variation as a display-sized number. For a second
+  monitor during a run.
+- **`report`** — the same layout with the chrome taken off: no bloom, no
+  scanlines, no notched corners, print-safe colours, controls hidden when
+  printed. For the screenshot that goes in the finding, where a glow around a
+  number is noise.
+
+The second theme is a palette swap and one `--bloom` variable rather than a
+second stylesheet, so the two cannot drift apart.
+
+### The colours mean five things
+
+Every colour on the page is one of these, and nothing else is coloured:
+
+| Colour | Means |
+|---|---|
+| cyan | the command channel |
+| magenta | the relay sessions it carries |
+| acid | the measurement's own numbers |
+| amber | a keep-alive |
+| red | a death |
+
+A panel says which of the five it belongs to with a short accent bar in its
+top-left corner, which costs no words.
+
+### Four choices worth naming
+
+Each follows from the domain rather than from taste.
 
 **The knob is a two-position switch, not a slider.** Its effect is a step,
 not a slope: anything from 1 to 119 seconds produces one held connection, and
 anything above 120 or exactly 0 produces the same ~120-second cadence. A
 slider would promise a range of outcomes that does not exist. The number box
-beside it is there for the values in between, labelled as what they are.
+beside it takes the values in between and lights up when one is set, so the
+page is never silent about what is actually running.
+
+**The big number is not in the display face.** Orbitron slashes its zero, so
+`0.020` reads as `Ø.Ø2Ø`. A headline can afford that character; a measured
+value that gets quoted in a finding cannot. Orbitron carries the titles, the
+mono carries every digit.
 
 **The timeline defaults to `fit`.** A six-second test cadence and an
 overnight held connection want windows three orders of magnitude apart, and a
 fixed default puts one of them in the last pixel column. The useful span is a
 property of the run, so it is read from the run.
 
-**Gaps are written on the chart, not just drawn.** The number between two
-command connections is the thing a periodicity detection is looking for, and
-a bar chart that only shows it as distance makes the reader estimate what the
-page already knows.
+**A gap is labelled only where it changes.** The number between two command
+connections is what a periodicity detection is looking for — but a steady run
+wrote the same number thirty-three times, which hid it. Now a label means
+"the rhythm changed here", and a run with one label is a run with one
+cadence.
 
 ## The routes
 

@@ -158,6 +158,33 @@ class RoutesTest(unittest.TestCase):
                     timeout=5)
             self.assertEqual(caught.exception.code, 404)
 
+    def test_the_fonts_are_served_from_here_with_the_right_type(self):
+        # The fonts are in the repository rather than on a CDN, because the
+        # page's own Content-Security-Policy is default-src 'self' and a
+        # measurement host usually has no internet. A wrong MIME type would
+        # break the page quietly, so it is worth a test.
+        with _Board() as board:
+            for name in ("orbitron-latin", "jetbrains-mono-latin"):
+                url = "http://127.0.0.1:%d/fonts/%s.woff2" % (board.port, name)
+                with urllib.request.urlopen(url, timeout=5) as response:
+                    self.assertEqual(response.headers["Content-Type"],
+                                     "font/woff2")
+                    self.assertTrue(response.read().startswith(b"wOF2"))
+
+    def test_totals_keep_counting_past_the_event_buffer(self):
+        # The ring buffer forgets; a counter on the page that silently
+        # stopped counting would be worse than no counter.
+        with _Board() as board:
+            board.board.events = EventLog(limit=2)
+            for _ in range(5):
+                board.ledger.record("client-connected", peer="10.0.0.9:4444")
+            board.ledger.record("session-open", host="10.0.0.5", port=80)
+            state = board.get("/api/state")
+            self.assertEqual(len(state["events"]), 2)
+            self.assertEqual(state["totals"]["connections"], 5)
+            self.assertEqual(state["totals"]["sessions"], 1)
+            self.assertEqual(state["cadence"][0]["connections"], 5)
+
 
 if __name__ == "__main__":
     unittest.main()

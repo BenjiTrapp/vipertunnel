@@ -69,6 +69,7 @@ _MIME = {
     ".css": "text/css; charset=utf-8",
     ".js": "application/javascript; charset=utf-8",
     ".svg": "image/svg+xml",
+    ".woff2": "font/woff2",
 }
 
 # Events that mark the arrival of a command connection. The gaps between
@@ -196,10 +197,23 @@ class Dashboard(ThreadingHTTPServer):
         # reconnect -- which is the thing being counted.
         self._arrivals = {}
         self._arrival_lock = threading.Lock()
+        # Running totals since this dashboard started. The event ring buffer
+        # forgets, and a counter on the page that silently stops counting
+        # would be worse than no counter.
+        self._totals = {"connections": 0, "keepalives": 0, "sessions": 0,
+                        "deaths": 0, "notes": 0}
         ledger.subscribe(self._observe)
         super(Dashboard, self).__init__(address, _Handler)
 
     # -- watching -----------------------------------------------------------
+
+    _COUNTS = {
+        _ARRIVAL: "connections",
+        "keepalive": "keepalives",
+        "session-open": "sessions",
+        "client-gone": "deaths",
+        "operator-note": "notes",
+    }
 
     def _observe(self, stamp, event, fields):
         if event == _ARRIVAL:
@@ -210,7 +224,15 @@ class Dashboard(ThreadingHTTPServer):
                 times.append(time.time())
                 if len(times) > _HISTORY:
                     del times[:len(times) - _HISTORY]
+        counted = self._COUNTS.get(event)
+        if counted:
+            with self._arrival_lock:
+                self._totals[counted] += 1
         self.events.record(stamp, event, fields)
+
+    def totals(self):
+        with self._arrival_lock:
+            return dict(self._totals)
 
     def cadences(self):
         with self._arrival_lock:
@@ -241,6 +263,7 @@ class Dashboard(ThreadingHTTPServer):
                         for client in self.fleet.snapshot()],
             "sessions": self.sessions.snapshot(),
             "cadence": self.cadences(),
+            "totals": self.totals(),
         }
 
     # -- doing --------------------------------------------------------------
@@ -398,6 +421,8 @@ class _Handler(BaseHTTPRequestHandler):
         # a dashboard for a lab tool should not be able to phone anywhere.
         self.send_header("Content-Security-Policy",
                          "default-src 'self'; connect-src 'self'")
+        if self.path.endswith(".woff2"):
+            self.send_header("Cache-Control", "public, max-age=604800")
         self.end_headers()
         self.wfile.write(body)
 
