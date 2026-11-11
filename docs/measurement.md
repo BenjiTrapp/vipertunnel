@@ -49,6 +49,40 @@ Measured here with `--timeout 5` to keep a test short: four connections in
 eighteen seconds, each from a different local port, three timeouts, and the
 server reaping each one after five seconds. That is the shape, scaled down.
 
+## The knob also decides whether the host is findable
+
+This came out of building the dashboard's self-probe, and it is not in any of
+the write-ups because the real operators never had a reason to turn the knob
+off.
+
+The `00 00` that a bare probe to the command port gets back — the trait that
+let researchers enumerate this family across hosting providers — **is the
+keep-alive leaking.** There is no separate banner. So a server that never
+sends a keep-alive never leaks one:
+
+| `KEEPALIVE` | A proxy log shows | A bare probe gets |
+|---|---|---|
+| below 120 s | one held connection, no cadence | `00 00` — **the host is fingerprintable** |
+| `0` | a reconnect every ~120 s, near-zero jitter | **nothing** — silent to a banner hunt |
+
+The two detection routes are therefore on opposite ends of one dial, and
+neither position exercises both:
+
+- `KEEPALIVE=0` is the easy target for a **periodicity** detection and
+  invisible to a **banner** hunt.
+- `KEEPALIVE=60` defeats periodicity entirely and is exactly what the Censys
+  query in [the provenance](provenance.md) finds.
+
+Which means a run in one position is not a test of the other, and a report
+that says "our detection found it" has to say which position it found. The
+dashboard's fingerprint panel probes the host and says which of the two you
+are currently running — see [the dashboard](dashboard.md).
+
+**For the real infrastructure this settles a small question**: every host
+InfoGuard found answered with `00 00`, so every one of them was running with
+a keep-alive — that is, in the held-connection shape, the one with no cadence
+at all. The fleet was configured the way that beats the commoner detection.
+
 ## The proxy is not optional
 
 The original dials its C2 directly and cannot cross a proxy. `--proxy` is

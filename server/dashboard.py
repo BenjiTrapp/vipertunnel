@@ -182,7 +182,8 @@ class Dashboard(ThreadingHTTPServer):
     allow_reuse_address = True
 
     def __init__(self, address, fleet, sessions, knob, ledger,
-                 socks_port, command_port, socks_credentials=None):
+                 socks_port, command_port, socks_credentials=None,
+                 wire=None, guard=None):
         self.fleet = fleet
         self.sessions = sessions
         self.knob = knob
@@ -190,8 +191,11 @@ class Dashboard(ThreadingHTTPServer):
         self.socks_port = socks_port
         self.command_port = command_port
         self.socks_credentials = socks_credentials
+        self.wire = wire
+        self.guard = guard
         self.started = time.time()
         self.events = EventLog()
+        self.relay_ports = []
         # Arrival times per implant host, for the cadence. Keyed by host and
         # not by peer, because the source port is different on every
         # reconnect -- which is the thing being counted.
@@ -228,6 +232,12 @@ class Dashboard(ThreadingHTTPServer):
         if counted:
             with self._arrival_lock:
                 self._totals[counted] += 1
+        if event == "relay-announced":
+            # The spread of five-digit ports is one of the traits a scan of
+            # the real infrastructure reports, so it is worth keeping.
+            with self._arrival_lock:
+                self.relay_ports.append(int(fields.get("port", 0)))
+                del self.relay_ports[:-50]
         self.events.record(stamp, event, fields)
 
     def totals(self):
@@ -249,6 +259,7 @@ class Dashboard(ThreadingHTTPServer):
                 "command_port": self.command_port,
                 "socks_port": self.socks_port,
                 "socks_auth": self.socks_credentials is not None,
+                "lab_only": bool(self.guard and not self.guard.allow_public),
                 "started": self.started,
                 "uptime_seconds": int(time.time() - self.started),
                 "now": time.time(),
@@ -292,6 +303,129 @@ class Dashboard(ThreadingHTTPServer):
                            text=text.replace(" ", "_") or "empty")
         return text
 
+    def wire_captures(self):
+        return self.wire.snapshot() if self.wire else []
+
+    def fingerprint(self, force=False):
+        """Probe our own command port the way a researcher's scanner did.
+
+        The `00 00` a bare probe gets back is how this family's
+        infrastructure was enumerated across hosting providers. Reproducing
+        it from the inside answers a question the documentation cannot: is
+        *this* host fingerprintable the way the real ones were?
+
+        The answer turns out to depend on the measurement knob, which is
+        worth knowing before a run rather than after. The banner is the
+        keep-alive leaking, so a server that never sends one never leaks it.
+
+        Two warnings, both honest rather than defensive:
+
+          * A bare probe is indistinguishable from an implant, because the
+            protocol has no identifier. So this connection briefly joins the
+            fleet, and `Fleet.pick` could hand it an operator's session --
+            which is exactly the hijack property the dialect has and the
+            documentation describes. It is refused while a real implant is
+            connected unless `force` says otherwise.
+          * It takes up to one keep-alive interval to get an answer.
+        """
+        connected = len(self.fleet.snapshot())
+        if connected and not force:
+            return {
+                "ok": False,
+                "detail": ("%d implant(s) are connected. A bare probe is "
+                           "indistinguishable from an implant, so it would "
+                           "join the fleet and could be handed a session -- "
+                           "the hijack the dialect allows. Force it only if "
+                           "no session is wanted during the probe."
+                           % connected),
+                "needs_force": True,
+            }
+
+        interval = self.knob.seconds
+        budget = min(_PROBE_TIMEOUT, interval + 2.0) if interval > 0 else 3.0
+        self.ledger.record("self-probe", by="dashboard",
+                           port=self.command_port, waited=int(budget))
+        started = time.monotonic()
+        banner = b""
+        try:
+            sock = socket.create_connection(("127.0.0.1", self.command_port),
+                                            timeout=budget)
+        except OSError as exc:
+            return {"ok": False, "detail": "could not reach our own command "
+                                           "port: %s" % exc}
+        try:
+            sock.settimeout(budget)
+            try:
+                banner = sock.recv(2)
+            except (socket.timeout, OSError):
+                banner = b""
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+        waited = round(time.monotonic() - started, 2)
+        got = " ".join("%02x" % byte for byte in banner)
+        if banner == b"\x00\x00":
+            verdict = ("fingerprintable. A bare probe gets 00 00, which is "
+                       "the trait that let researchers enumerate this "
+                       "family across hosting providers.")
+        elif banner:
+            verdict = ("something came back, but not the keep-alive: %s" % got)
+        elif interval <= 0:
+            verdict = ("silent, and the knob is why. With no keep-alive "
+                       "there is nothing to leak, so this host does NOT "
+                       "carry the family's banner -- the same setting that "
+                       "removes the cadence also removes the fingerprint. "
+                       "Worth recording: a run in this position is testing "
+                       "neither a periodicity detection nor a banner hunt.")
+        else:
+            verdict = ("silent after %ss, which is longer than the %gs "
+                       "keep-alive interval -- unexpected."
+                       % (waited, interval))
+
+        with self._arrival_lock:
+            ports = sorted(set(p for p in self.relay_ports if p))
+        return {
+            "ok": True,
+            "banner": got or None,
+            "waited": waited,
+            "keepalive": interval,
+            "verdict": verdict,
+            "relay_ports": ports[-12:],
+            "traits": self._traits(bool(banner == b"\x00\x00"), ports),
+        }
+
+    # Straight from the infrastructure table in docs/provenance.md, so the
+    # emulation can be checked against what the real hosts reported rather
+    # than against an impression of them.
+    def _traits(self, banner, ports):
+        return [
+            {"trait": "00 00 on a bare probe to the command port",
+             "real": "yes -- the trait that enumerated the fleet",
+             "here": "yes" if banner else "no, the keep-alive is off"},
+            {"trait": "command port 443",
+             "real": "yes",
+             "here": "yes" if self.command_port == 443
+                     else "no, %d" % self.command_port},
+            {"trait": "a spread of five-digit relay ports",
+             "real": "yes",
+             "here": ("yes -- %d seen, e.g. %s" % (len(ports), ports[-3:]))
+                     if ports else "none announced yet"},
+            {"trait": "plaintext SOCKS over 443, not wrapped in TLS",
+             "real": "yes", "here": "yes"},
+            {"trait": "port 22 open alongside, Ubuntu 22.04 OpenSSH banner",
+             "real": "~75% of identified hosts",
+             "here": "your host's business, not this tool's"},
+            {"trait": "Pyramid C2 on 8000 answering 401 Basic realm=\"Proxy\"",
+             "real": "often", "here": "no -- out of scope"},
+            {"trait": "a listening HTTP port for an operator view",
+             "real": "no",
+             "here": "YES, this dashboard -- out of band, and the one trait "
+                     "that would give the emulation away"},
+        ]
+
     def probe(self, host, port, payload=""):
         """Open one session through the tunnel, the way `curl --socks5` does.
 
@@ -301,6 +435,10 @@ class Dashboard(ThreadingHTTPServer):
         proves the whole path rather than half of it.
         """
         raw = payload.encode("utf-8", "replace")[:_PROBE_SEND_MAX]
+        if self.guard is not None:
+            refusal = self.guard.refuse(host)
+            if refusal:
+                return {"ok": False, "status": None, "detail": refusal}
         started = time.monotonic()
         sock = socket.create_connection(("127.0.0.1", self.socks_port),
                                         timeout=_PROBE_TIMEOUT)
@@ -450,6 +588,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(payload)
         if route == "/api/events":
             return self._stream()
+        if route == "/api/wire":
+            return self._json({"captures": self.server.wire_captures()})
         return self._static(route)
 
     def do_POST(self):
@@ -474,6 +614,9 @@ class _Handler(BaseHTTPRequestHandler):
                     str(body.get("host", "")),
                     int(body.get("port", 0)),
                     str(body.get("payload", ""))))
+            if route == "/api/fingerprint":
+                return self._json(self.server.fingerprint(
+                    bool(body.get("force"))))
         except (ValueError, TypeError) as exc:
             return self._json({"error": str(exc)}, 400)
         except OSError as exc:

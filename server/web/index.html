@@ -16,6 +16,7 @@
     <dt>command</dt><dd id="fact-command">—</dd>
     <dt>operator</dt><dd id="fact-socks">—</dd>
     <dt>up</dt><dd id="fact-uptime">—</dd>
+    <dt>targets</dt><dd id="fact-targets">—</dd>
     <dt>feed</dt><dd id="fact-feed" class="down">connecting</dd>
   </dl>
   <button id="theme" class="ghost" title="Grid / Report">theme</button>
@@ -126,6 +127,41 @@
       <button type="submit">write</button>
     </form>
     <output id="note-out"></output>
+  </section>
+</div>
+
+<div class="two">
+  <section class="panel">
+    <div class="panel-head">
+      <h2>wire tap · last handshake</h2>
+      <span class="count" id="wire-count">0</span>
+      <button id="wire-refresh" class="ghost">refresh</button>
+    </div>
+    <p class="d">The bytes that actually went out, with the deviation from
+      RFC 1928 named at each step. Handshakes only — the relayed payload is
+      the victim network's own traffic and is never captured.</p>
+    <div id="wire"></div>
+    <p class="empty" id="wire-empty">
+      No handshake yet. Drive a session and the bytes appear here, so the
+      claim that this is the family's wire can be read off the running
+      program instead of a table.
+    </p>
+  </section>
+
+  <section class="panel a">
+    <div class="panel-head">
+      <h2>fingerprint · what a scanner sees</h2>
+      <button id="fp-run" class="ghost">probe this host</button>
+    </div>
+    <p class="d">Connects to our own command port the way a researcher's
+      scanner did. The <code>00 00</code> a bare probe gets back is how this
+      family's infrastructure was enumerated across hosting providers — and
+      whether this host leaks it depends on the knob above.</p>
+    <output id="fp-out"></output>
+    <table class="grid-t hidden" id="fp-traits">
+      <thead><tr><th>trait</th><th>the real thing</th><th>here</th></tr></thead>
+      <tbody></tbody>
+    </table>
   </section>
 </div>
 

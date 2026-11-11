@@ -13,7 +13,8 @@ import urllib.error
 import urllib.request
 
 from server.dashboard import Dashboard, EventLog, cadence
-from server.server import Fleet, Knob, Ledger, SessionBook
+from server.server import (Fleet, Knob, LabGuard, Ledger, SessionBook,
+                           WireLog)
 
 
 class CadenceTest(unittest.TestCase):
@@ -78,9 +79,11 @@ class _Board(object):
         self.ledger = Ledger(None)
         self.knob = Knob(60.0)
         self.fleet = Fleet(self.ledger)
+        self.wire = WireLog()
         self.board = Dashboard(("127.0.0.1", 0), self.fleet, SessionBook(),
                                self.knob, self.ledger, socks_port=0,
-                               command_port=443)
+                               command_port=443, wire=self.wire,
+                               guard=LabGuard())
         self.port = self.board.server_address[1]
         self.thread = threading.Thread(target=self.board.serve_forever,
                                        daemon=True)

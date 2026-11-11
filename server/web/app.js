@@ -69,6 +69,11 @@ function stream() {
     renderFeed();
     renderProxyLog();
     renderTimeline();
+    // A handshake just finished, so the capture is new.
+    if (entry.event === "session-open" || entry.event === "dialect-failed" ||
+        entry.event === "target-refused-by-client") {
+      renderWire();
+    }
   };
 }
 
@@ -146,7 +151,111 @@ function renderStrip() {
     el("fact-socks").textContent = `127.0.0.1:${model.server.socks_port}` +
       (model.server.socks_auth ? " auth" : "");
     el("fact-uptime").textContent = duration(model.server.uptime_seconds);
+    const lab = model.server.lab_only;
+    const targets = el("fact-targets");
+    targets.textContent = lab ? "lab only" : "ANYWHERE";
+    targets.className = lab ? "up" : "down";
+    targets.title = lab
+      ? "Relaying is limited to the private ranges, loopback and link-local."
+      : "--allow-public is set: this will relay to routable addresses.";
   }
+}
+
+/* -- wire tap -------------------------------------------------------------- */
+
+/* The repository's claim is the wire. Showing the bytes next to the
+ * deviation they embody is what turns that from an assertion into something
+ * a reader can check. */
+async function renderWire() {
+  const answer = await (await fetch("/api/wire")).json();
+  const captures = answer.captures || [];
+  el("wire-count").textContent = captures.length;
+  el("wire-empty").classList.toggle("hidden", captures.length > 0);
+  const host = el("wire");
+  host.textContent = "";
+  if (!captures.length) return;
+
+  const capture = captures[0];
+  const head = document.createElement("div");
+  head.className = "wire-head";
+  head.innerHTML =
+    `<span class="k">${new Date(capture.at * 1000).toISOString().slice(11, 19)}Z</span> ` +
+    `<b>${escapeText(capture.peer)}</b> → ${escapeText(capture.target)} ` +
+    `<span class="${capture.outcome === "carried" ? "ok" : "bad"}">${escapeText(capture.outcome)}</span>`;
+  host.appendChild(head);
+
+  for (const step of capture.steps) {
+    const row = document.createElement("div");
+    row.className = "wire-step " +
+      (step.direction === "to-implant" ? "out" : "in");
+    const arrow = step.direction === "to-implant" ? "→" : "←";
+    row.innerHTML =
+      `<div class="wire-label">${arrow} ${escapeText(step.label)}</div>` +
+      `<div class="wire-hex">${escapeText(step.hex)}` +
+      (step.bytes > 300 ? ` <span class="k">… ${step.bytes} B</span>` : "") +
+      `</div><div class="wire-note">${escapeText(step.note)}</div>`;
+    host.appendChild(row);
+  }
+}
+
+/* -- fingerprint ----------------------------------------------------------- */
+
+async function runFingerprint(force) {
+  const out = el("fp-out");
+  out.textContent = "probing our own command port…";
+  const result = await post("/api/fingerprint", { force: !!force });
+  out.textContent = "";
+
+  if (!result.ok) {
+    const line = document.createElement("div");
+    line.className = "bad";
+    line.textContent = result.detail;
+    out.appendChild(line);
+    if (result.needs_force) {
+      const button = document.createElement("button");
+      button.className = "ghost";
+      button.textContent = "probe anyway";
+      button.style.marginTop = "8px";
+      button.onclick = () => runFingerprint(true);
+      out.appendChild(button);
+    }
+    el("fp-traits").classList.add("hidden");
+    return;
+  }
+
+  const banner = document.createElement("div");
+  banner.className = result.banner === "00 00" ? "ok" : "bad";
+  banner.textContent = result.banner
+    ? `banner: ${result.banner}   (after ${result.waited}s)`
+    : `no banner after ${result.waited}s`;
+  out.appendChild(banner);
+
+  const verdict = document.createElement("div");
+  verdict.style.marginTop = "6px";
+  verdict.textContent = result.verdict;
+  out.appendChild(verdict);
+
+  if (result.relay_ports && result.relay_ports.length) {
+    const ports = document.createElement("div");
+    ports.style.marginTop = "6px";
+    ports.innerHTML = `<span class="k">relay ports announced:</span> ` +
+      escapeText(result.relay_ports.join(", "));
+    out.appendChild(ports);
+  }
+
+  const table = el("fp-traits");
+  const body = table.querySelector("tbody");
+  body.textContent = "";
+  for (const trait of result.traits) {
+    const row = body.insertRow();
+    row.insertCell().textContent = trait.trait;
+    row.insertCell().textContent = trait.real;
+    const here = row.insertCell();
+    here.textContent = trait.here;
+    here.className = /^yes/.test(trait.here) ? "yes"
+                   : /^YES/.test(trait.here) ? "warnish" : "";
+  }
+  table.classList.remove("hidden");
 }
 
 /* -- fleet and sessions ---------------------------------------------------- */
@@ -339,6 +448,9 @@ function sessionSegments() {
 }
 
 const hostPart = (peer) => String(peer).replace(/:\d+$/, "") || "unknown";
+
+const escapeText = (text) => String(text).replace(/[<>&"]/g, (c) =>
+  ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
 
 /* A hover card rather than an SVG <title>: a run is read by sweeping across
  * it, and a tooltip that takes a second to appear cannot be swept. */
@@ -622,6 +734,9 @@ el("note").onsubmit = async (event) => {
   event.target.reset();
 };
 
+el("wire-refresh").onclick = renderWire;
+el("fp-run").onclick = () => runFingerprint(false);
+
 el("theme").onclick = () => {
   const root = document.documentElement;
   const next = root.dataset.theme === "grid" ? "report" : "grid";
@@ -636,4 +751,5 @@ window.addEventListener("resize", renderTimeline);
 
 poll();
 stream();
+renderWire();
 setInterval(poll, POLL_MS);

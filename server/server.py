@@ -29,6 +29,16 @@ purpose -- a listening HTTP port is something this family does not have, so
 it would show up in a scan of the measurement host as a trait of the tool
 rather than of the family.
 
+## One thing this is not faithful about, deliberately
+
+`LabGuard` refuses to relay anywhere outside the private ranges, loopback and
+link-local unless `--allow-public` is passed. The original has no such check
+and would tunnel anywhere its operator pointed it. This one does, because an
+operator port on loopback plus a mistyped CIDR is enough to scan the public
+internet through somebody's workstation, and the authorisation note in the
+README would have been the only thing that had stopped it. Refusals are
+recorded.
+
 ## The knob the measurement turns
 
 `--keepalive` is the experimental variable, and its effect is a step rather
@@ -320,6 +330,82 @@ class Fleet(object):
         return None
 
 
+class WireLog(object):
+    """The actual bytes of the last few dialect handshakes.
+
+    This repository's whole claim is that it reproduces one family's wire
+    faithfully. Until now that claim lived in a table in the documentation
+    and nowhere in the running program, so it had to be taken on trust. A
+    capture puts the bytes that actually went out beside what the derivation
+    says they should be, which makes the claim checkable instead.
+
+    **Handshakes only.** The relayed payload is never captured: it is the
+    victim network's own traffic, it is unbounded, and none of it is needed
+    to show that the dialect is right.
+    """
+
+    _ids = itertools.count(1)
+
+    def __init__(self, limit=8):
+        self._limit = limit
+        self._captures = []
+        self._lock = threading.Lock()
+
+    def start(self, peer, target):
+        return _Capture(self, peer, target)
+
+    def _add(self, capture):
+        with self._lock:
+            self._captures.append(capture)
+            if len(self._captures) > self._limit:
+                del self._captures[:len(self._captures) - self._limit]
+
+    def snapshot(self):
+        with self._lock:
+            return [capture.describe() for capture in reversed(self._captures)]
+
+
+class _Capture(object):
+    """One handshake, step by step, with the deviation named at each step."""
+
+    # A domain name can be 255 bytes and nothing here is longer; the cap
+    # keeps a malformed peer from filling the ring with one step.
+    _MAX = 300
+
+    def __init__(self, log, peer, target):
+        self._log = log
+        self.id = next(WireLog._ids)
+        self.peer = peer
+        self.target = target
+        self.at = time.time()
+        self.steps = []
+        self.outcome = "incomplete"
+
+    def step(self, direction, label, data, note):
+        raw = bytes(data)[:self._MAX]
+        self.steps.append({
+            "direction": direction,        # "to-implant" or "from-implant"
+            "label": label,
+            "hex": " ".join("%02x" % byte for byte in raw),
+            "bytes": len(data),
+            "note": note,
+        })
+
+    def finish(self, outcome):
+        self.outcome = outcome
+        self._log._add(self)
+
+    def describe(self):
+        return {
+            "id": self.id,
+            "at": self.at,
+            "peer": self.peer,
+            "target": self.target,
+            "outcome": self.outcome,
+            "steps": self.steps,
+        }
+
+
 class SessionBook(object):
     """The relay sessions carrying traffic right now.
 
@@ -402,6 +488,55 @@ class RelayBroker(object):
             listener.close()
 
 
+class LabGuard(object):
+    """Refuse to relay anywhere that is obviously not your lab.
+
+    The authorisation note in the README says this is adversary emulation in
+    a lab you own. The program did nothing to hold itself to that: an
+    operator port on loopback will happily tunnel a scan of the public
+    internet through somebody's workstation, and a typo in a CIDR is enough.
+
+    So by default the targets allowed are the private ranges, loopback and
+    link-local. `--allow-public` turns the guard off and says so in the
+    ledger, because sometimes a lab really does use routable space -- but it
+    should then be a decision somebody made rather than a default nobody
+    noticed. Refusals are recorded; a quiet guard would be its own trap.
+    """
+
+    def __init__(self, allow_public=False):
+        self.allow_public = allow_public
+
+    def refuse(self, host):
+        """Return a reason to refuse `host`, or None to allow it."""
+        if self.allow_public:
+            return None
+        try:
+            packed = socket.inet_pton(socket.AF_INET, host)
+        except OSError:
+            # A name, not an address. Resolving it here would be a lookup the
+            # original never makes, so the name is judged by what it resolves
+            # to only if resolution is free -- and refused otherwise.
+            try:
+                host = socket.gethostbyname(host)
+                packed = socket.inet_pton(socket.AF_INET, host)
+            except OSError:
+                return ("the name did not resolve, so it cannot be shown to "
+                        "be inside the lab (use --allow-public to permit it)")
+        a, b = packed[0], packed[1]
+        private = (a == 10
+                   or (a == 172 and 16 <= b <= 31)
+                   or (a == 192 and b == 168)
+                   or a == 127
+                   or (a == 169 and b == 254)
+                   or (a == 100 and 64 <= b <= 127))      # CGNAT, RFC 6598
+        if private:
+            return None
+        return ("%s is outside the private ranges, loopback and link-local. "
+                "This is adversary emulation for a lab you own; pass "
+                "--allow-public if the lab really is on routable space."
+                % host)
+
+
 class OperatorHandler(socketserver.BaseRequestHandler):
     """RFC 1928 on this side, the client's dialect on the other.
 
@@ -427,6 +562,14 @@ class OperatorHandler(socketserver.BaseRequestHandler):
             self._reply(operator, _RFC_CMD_UNSUPPORTED)
             return
 
+        refusal = self.server.guard.refuse(host)
+        if refusal:
+            ledger.record("target-outside-the-lab", host=host, port=port,
+                          reason=refusal.replace(" ", "_"))
+            LOG.error("refusing %s:%d -- %s", host, port, refusal)
+            self._reply(operator, _RFC_REFUSED)
+            return
+
         client = fleet.pick()
         if client is None:
             ledger.record("operator-refused", reason="no client connected",
@@ -441,20 +584,30 @@ class OperatorHandler(socketserver.BaseRequestHandler):
             self._reply(operator, _RFC_GENERAL_FAILURE)
             return
 
+        capture = self.server.wire.start(client.peer, "%s:%d" % (host, port))
+        capture.step("to-implant", "relay port announced",
+                     _U16_LE.pack(relay_port),
+                     "a bare uint16, little-endian: the port to dial back "
+                     "on. Not in RFC 1928 at all -- the command channel "
+                     "carries nothing else, and a zero here is the "
+                     "keep-alive.")
         try:
-            bound = self._drive_dialect(relay, host, port)
+            bound = self._drive_dialect(relay, host, port, capture)
         except OSError as exc:
+            capture.finish("failed: %s" % exc)
             ledger.record("dialect-failed", host=host, port=port, error=exc)
             self._reply(operator, _RFC_HOST_UNREACHABLE)
             relay.close()
             return
 
         if bound is None:
+            capture.finish("the implant could not reach the target")
             ledger.record("target-refused-by-client", host=host, port=port)
             self._reply(operator, _RFC_REFUSED)
             relay.close()
             return
 
+        capture.finish("carried")
         client.sessions += 1
         entry = self.server.sessions.open(client, host, port, relay_port)
         ledger.record("session-open", host=host, port=port,
@@ -531,27 +684,52 @@ class OperatorHandler(socketserver.BaseRequestHandler):
 
     # -- the client's side, which is the dialect ------------------------------
 
-    def _drive_dialect(self, relay, host, port):
+    def _drive_dialect(self, relay, host, port, capture=None):
         """Speak the greeting, the request and read the reply.
 
         Returns the bound address the client reported, or None if the client
         refused the target.
+
+        `capture` records the bytes and names the deviation at every step, so
+        the claim that this is the family's wire can be read off the running
+        program rather than taken from a table.
         """
+        def note(direction, label, data, text):
+            if capture is not None:
+                capture.step(direction, label, data, text)
+
         # Greeting with NO version byte: just a count and the methods.
         if self.server.client_credentials is None:
-            relay.sendall(_U8.pack(1) + _U8.pack(_AUTH_NONE))
+            greeting = _U8.pack(1) + _U8.pack(_AUTH_NONE)
+            which = "method 0, no authentication"
         else:
-            relay.sendall(_U8.pack(1) + _U8.pack(_AUTH_USERPASS))
-        chosen = _U8.unpack(_recv_exactly(relay, 1))[0]
+            greeting = _U8.pack(1) + _U8.pack(_AUTH_USERPASS)
+            which = "method 2, username and password"
+        relay.sendall(greeting)
+        note("to-implant", "greeting", greeting,
+             "nmethods | methods -- %s. RFC 1928 puts a 05 version byte "
+             "first; this dialect has none, which is why an RFC client "
+             "deadlocks against it." % which)
+        chosen = _recv_exactly(relay, 1)
+        note("from-implant", "method chosen", chosen,
+             "the selected method, as in the RFC")
+        chosen = _U8.unpack(chosen)[0]
 
         if chosen == _AUTH_USERPASS:
             user, secret = self.server.client_credentials or ("", "")
             raw_user = user.encode("utf-8")
             raw_secret = secret.encode("utf-8")
             # Both lengths first, then both strings.
-            relay.sendall(_PAIR.pack(len(raw_user), len(raw_secret))
-                          + raw_user + raw_secret)
-            if _U8.unpack(_recv_exactly(relay, 1))[0] != _DIALECT_OK:
+            auth = (_PAIR.pack(len(raw_user), len(raw_secret))
+                    + raw_user + raw_secret)
+            relay.sendall(auth)
+            note("to-implant", "credentials", auth,
+                 "ulen | plen | uname | passwd. RFC 1929 interleaves them "
+                 "as VER ULEN UNAME PLEN PASSWD.")
+            reply = _recv_exactly(relay, 1)
+            note("from-implant", "auth reply", reply,
+                 "1 is success here. The RFC uses 0.")
+            if _U8.unpack(reply)[0] != _DIALECT_OK:
                 raise OSError("the client refused our credentials")
         elif chosen != _AUTH_NONE:
             raise OSError("the client chose method %d" % chosen)
@@ -560,21 +738,41 @@ class OperatorHandler(socketserver.BaseRequestHandler):
             packed = socket.inet_pton(socket.AF_INET, host)
         except OSError:
             raw = host.encode("utf-8")
-            relay.sendall(_TRIPLE.pack(_CMD_CONNECT, _ATYP_DOMAIN, len(raw))
-                          + raw + _U16_LE.pack(port))
+            request = (_TRIPLE.pack(_CMD_CONNECT, _ATYP_DOMAIN, len(raw))
+                       + raw + _U16_LE.pack(port))
+            shape = ("cmd | atyp=3 | addrlen | name | port. The port is "
+                     "little-endian: %02x %02x is %d, not %d."
+                     % (port & 0xff, port >> 8, port,
+                        ((port & 0xff) << 8) | (port >> 8)))
         else:
             # `addrlen` is sent even for IPv4, where the client ignores it.
-            relay.sendall(_TRIPLE.pack(_CMD_CONNECT, _ATYP_IPV4, 4)
-                          + packed + _U16_LE.pack(port))
+            request = (_TRIPLE.pack(_CMD_CONNECT, _ATYP_IPV4, 4)
+                       + packed + _U16_LE.pack(port))
+            shape = ("cmd | atyp=1 | addrlen=4 | addr | port. No version "
+                     "byte and no RSV. addrlen is sent even for IPv4, where "
+                     "the client reads four bytes regardless and ignores it. "
+                     "The port is little-endian: %02x %02x is %d."
+                     % (port & 0xff, port >> 8, port))
+        relay.sendall(request)
+        note("to-implant", "connect request", request, shape)
 
-        status = _U8.unpack(_recv_exactly(relay, 1))[0]
+        raw_status = _recv_exactly(relay, 1)
+        status = _U8.unpack(raw_status)[0]
+        note("from-implant", "reply status", raw_status,
+             "1 means the target connected; 0 means refused. Inverted "
+             "against RFC 1928, where 0 is success.")
         if status != _DIALECT_OK:
             return None
-        atyp, addrlen = _PAIR.unpack(_recv_exactly(relay, 2))
+        bound = _recv_exactly(relay, 2)
+        atyp, addrlen = _PAIR.unpack(bound)
         if atyp != _ATYP_IPV4 or addrlen != 4:
             raise OSError("the client answered with an address we cannot read")
-        bound_host = socket.inet_ntoa(_recv_exactly(relay, 4))
-        bound_port = _U16_LE.unpack(_recv_exactly(relay, 2))[0]
+        rest = _recv_exactly(relay, 6)
+        note("from-implant", "bound address", bound + rest,
+             "atyp | addrlen | addr | port -- the address the implant's own "
+             "socket got, port little-endian again.")
+        bound_host = socket.inet_ntoa(rest[:4])
+        bound_port = _U16_LE.unpack(rest[4:])[0]
         return bound_host, bound_port
 
 
@@ -583,13 +781,15 @@ class OperatorServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
 
     def __init__(self, address, fleet, broker, sessions, ledger,
-                 credentials, client_credentials):
+                 credentials, client_credentials, wire, guard):
         self.fleet = fleet
         self.broker = broker
         self.sessions = sessions
         self.ledger = ledger
         self.credentials = credentials
         self.client_credentials = client_credentials
+        self.wire = wire
+        self.guard = guard
         super(OperatorServer, self).__init__(address, OperatorHandler)
 
 
@@ -708,6 +908,13 @@ def main(argv=None):
                              "have, so it changes what a scan of this host "
                              "reports. Reach it over an SSH forward rather "
                              "than exposing it.")
+    parser.add_argument("--allow-public", action="store_true",
+                        help="permit relaying to addresses outside the "
+                             "private ranges, loopback and link-local. OFF "
+                             "by default: this is emulation for a lab you "
+                             "own, and an operator port on loopback will "
+                             "otherwise tunnel a mistyped CIDR to the public "
+                             "internet through somebody's workstation.")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args(argv)
 
@@ -727,6 +934,8 @@ def main(argv=None):
     knob = Knob(args.keepalive)
     fleet = Fleet(ledger)
     sessions = SessionBook()
+    wire = WireLog()
+    guard = LabGuard(args.allow_public)
     broker = RelayBroker(args.bind, ledger)
     stop = threading.Event()
 
@@ -745,12 +954,15 @@ def main(argv=None):
 
     operator = OperatorServer(("127.0.0.1", args.socks), fleet, broker,
                               sessions, ledger, credentials,
-                              client_credentials)
+                              client_credentials, wire, guard)
 
     ledger.record("server-start", command_port=args.port,
                   socks_port=args.socks, keepalive=int(args.keepalive),
+                  targets="anywhere" if args.allow_public else "lab_only",
                   expected_shape=knob.shape.replace(" ", "_"))
     LOG.info("keep-alive %.0fs means: %s", args.keepalive, knob.shape)
+    if args.allow_public:
+        LOG.warning("--allow-public: this will relay to routable addresses")
 
     threads = [
         threading.Thread(target=_serve_clients,
@@ -765,7 +977,7 @@ def main(argv=None):
         board = _dashboard_class()(
             ("127.0.0.1", args.dashboard), fleet, sessions, knob, ledger,
             socks_port=args.socks, command_port=args.port,
-            socks_credentials=credentials)
+            socks_credentials=credentials, wire=wire, guard=guard)
         threads.append(threading.Thread(target=board.serve_forever,
                                         name="dashboard", daemon=True))
         LOG.info("dashboard on http://127.0.0.1:%d -- out of band, and a "

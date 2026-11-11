@@ -64,12 +64,51 @@ never worth the run.
 | **Reconstructed proxy log** | the same run as a forward proxy would have written it — the only part of this page a detection can see |
 | **Fleet** | which implants have a command connection open, for how long, and how many keep-alives and sessions each has carried |
 | **Sessions** | which relays are carrying traffic right now, to what target, over which five-digit port |
+| **Wire tap** | the bytes of the last handshake, with the deviation from RFC 1928 named at each step |
+| **Fingerprint** | what a scanner pointed at this host would get back, beside what the real infrastructure returned |
 
 The ledger and the proxy log sit side by side, and that is the point of the
 whole repository: the left pane holds everything that happened and the right
 pane holds everything a detection gets. Nothing in it is invented — the
 server does not know what hostname the implant dialled or how many bytes a
 proxy counted, so those stay `?` rather than being guessed at.
+
+### The wire tap, and why it is here
+
+This repository's claim is the wire. Until the tap existed that claim lived
+in [a table](protocol.md) and nowhere in the running program, so it had to be
+taken on trust. The panel shows the bytes that actually went out — the
+announced relay port as a bare little-endian `uint16`, the greeting without
+its version byte, `addrlen` sent for an IPv4 address that ignores it, the
+port in the wrong byte order, `01` for success — each with its deviation
+spelled out beside it.
+
+**Handshakes only.** The relayed payload is never captured: it is the victim
+network's own traffic, it is unbounded, and none of it is needed to show the
+dialect is right.
+
+### The fingerprint panel, and the thing it found
+
+It connects to this server's own command port the way a researcher's scanner
+did, and reports what came back. Three things worth knowing:
+
+**It answers a question the documentation cannot** — is *this* host
+fingerprintable the way the real ones were? The answer turned out to depend
+on the measurement knob, which nobody had written down: the `00 00` is the
+keep-alive leaking, so `--keepalive 0` is silent to a banner hunt while being
+the only position with a cadence. [The measurement](measurement.md) has the
+table.
+
+**It is refused while an implant is connected**, unless forced. A bare probe
+is indistinguishable from an implant, because the protocol has no identifier
+— so the probe briefly joins the fleet, and `Fleet.pick` could hand it an
+operator's session. That is precisely the hijack the dialect allows, and the
+refusal is there so a probe does not demonstrate it on your own run by
+accident.
+
+**One row of the trait table is amber:** this dashboard is the single trait
+the real infrastructure does not have. A scan of the measurement host taken
+with it up reports the tool.
 
 ### The cadence panel says two things, not one
 
@@ -180,6 +219,8 @@ cadence.
 | `POST /api/hangup` | `{"client": 3}` — close one command connection |
 | `POST /api/probe` | `{"host": "10.0.0.5", "port": 80, "payload": ""}` |
 | `POST /api/note` | `{"text": "SIEM alert 4411 fired"}` |
+| `GET /api/wire` | the last eight captured handshakes, annotated |
+| `POST /api/fingerprint` | `{"force": false}` — probe our own command port |
 
 They are plain JSON over loopback with no authentication, which is the same
 decision the operator SOCKS port already made: loopback keeps other hosts

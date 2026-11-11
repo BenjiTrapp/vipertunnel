@@ -90,6 +90,15 @@ pick a higher port knowing what you traded.
 port. Loopback keeps other hosts out; it does nothing about other local users
 on the same box.
 
+**Relaying is limited to your lab by default.** The operator port will carry
+traffic to the private ranges, loopback and link-local, and refuses anything
+else — because an operator port on loopback will otherwise tunnel a mistyped
+CIDR to the public internet through somebody's workstation, and the
+authorisation note below would be the only thing that had stopped it.
+`--allow-public` turns the guard off for a lab that really is on routable
+space, warns on start-up, and says so in the ledger. Refusals are recorded as
+`target-outside-the-lab`.
+
 ```
 ./run-tests.sh
 ```
@@ -101,7 +110,7 @@ on the same box.
 | [docs/protocol.md](docs/protocol.md) | the dialect, byte for byte, and why an RFC 1928 client cannot talk to it |
 | [docs/measurement.md](docs/measurement.md) | the keep-alive knob, why its effect is a step, the ledger, and what to expect of a periodicity detection |
 | [docs/deployment.md](docs/deployment.md) | the proxy preflight and its three verdicts, the two proxy shapes, and whether Mythic helps |
-| [docs/dashboard.md](docs/dashboard.md) | the operator view: what it shows, what it can change, and why it is out of band |
+| [docs/dashboard.md](docs/dashboard.md) | the operator view: what it shows, the wire tap, the fingerprint probe, and why it is out of band |
 | [docs/provenance.md](docs/provenance.md) | who named the family and when, the four clusters, the infrastructure traits, the corroborated indicators, MITRE ATT&CK, and the reading list |
 
 ## Authorisation

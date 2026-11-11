@@ -348,6 +348,54 @@ b { color: var(--ink); }
 .tip .t { color: var(--tx); }
 .tip .k { color: var(--muted); }
 
+/* -- wire tap -------------------------------------------------------------- */
+
+.wire-head {
+  font-size: 12px;
+  color: var(--ink2);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+}
+.wire-head .k { color: var(--muted); }
+.wire-head .ok { color: var(--acid); }
+.wire-head .bad { color: var(--dead); }
+
+.wire-step {
+  display: grid;
+  grid-template-columns: 170px 1fr;
+  gap: 4px 12px;
+  padding: 8px 0 8px 10px;
+  border-bottom: 1px solid var(--grid);
+  border-left: 2px solid var(--rx);
+}
+/* Direction by colour, so the conversation reads without labels: cyan goes
+ * to the implant, magenta comes back. */
+.wire-step.in { border-left-color: var(--tx); }
+.wire-step:last-child { border-bottom: 0; }
+.wire-label {
+  font-family: "Orbitron", sans-serif;
+  font-size: 9px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-top: 2px;
+}
+.wire-step.out .wire-label { color: var(--rx); }
+.wire-step.in .wire-label { color: var(--tx); }
+.wire-hex {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: .04em;
+  word-break: break-all;
+}
+.wire-hex .k { color: var(--muted); font-weight: 400; }
+.wire-note { grid-column: 2; font-size: 11.5px; color: var(--ink2); }
+
+.grid-t td.yes { color: var(--acid); }
+.grid-t td.warnish { color: var(--warn); }
+
 /* -- tables ---------------------------------------------------------------- */
 
 .grid-t { width: 100%; border-collapse: collapse; font-size: 12.5px; }
