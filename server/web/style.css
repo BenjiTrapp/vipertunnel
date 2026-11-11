@@ -207,7 +207,7 @@ code { color: var(--accent); }
   font-size: 11px;
 }
 
-.columns { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.columns { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start; }
 @media (max-width: 1000px) { .columns { grid-template-columns: 1fr; } }
 
 .empty {

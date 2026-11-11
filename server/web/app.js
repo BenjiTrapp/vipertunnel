@@ -402,16 +402,22 @@ function renderTimeline() {
                    `y1="${top + 6}" x2="${x(segment.died).toFixed(1)}" ` +
                    `y2="${top + 28}"/>`);
       }
-      // The gap to the previous connection, written on the chart: this is
-      // the number a periodicity detection is looking for.
+      /* The gap to the previous connection, written on the chart: this is
+       * the number a periodicity detection is looking for.
+       *
+       * Labelled only where it changes. A steady cadence gets one label and
+       * then silence, so a label on the chart means "the rhythm changed
+       * here" -- which is the thing worth noticing. Twenty-three identical
+       * numbers in a row are noise that hide it. */
       const previous = mine[position - 1];
       if (previous && previous.end) {
-        const gap = segment.start - previous.start;
+        const gap = Math.round(segment.start - previous.start);
+        const before = position > 1
+          ? Math.round(previous.start - mine[position - 2].start) : null;
         const mid = (x(previous.start) + x1) / 2;
-        if (x1 - x(previous.start) > 34) {
+        if (gap !== before && x1 - x(previous.start) > 28) {
           parts.push(`<text class="gap-label" x="${mid.toFixed(1)}" ` +
-                     `y="${top + 36}" text-anchor="middle">${
-                       Math.round(gap)}s</text>`);
+                     `y="${top + 36}" text-anchor="middle">${gap}s</text>`);
         }
       }
     });
