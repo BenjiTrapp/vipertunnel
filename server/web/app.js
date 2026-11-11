@@ -72,7 +72,11 @@ function stream() {
   };
 }
 
-const setFeedStatus = (text) => { el("m-feed").textContent = "feed: " + text; };
+const setFeedStatus = (text) => {
+  const node = el("fact-feed");
+  node.textContent = text;
+  node.className = text === "live" ? "up" : "down";
+};
 
 async function post(route, body) {
   const response = await fetch(route, {
@@ -83,20 +87,17 @@ async function post(route, body) {
   return response.json();
 }
 
-/* -- the hero -------------------------------------------------------------- */
+/* -- the strip ------------------------------------------------------------- */
 
-/* The busiest host is the one whose numbers go in the headline. With one
+/* The busiest host is the one whose numbers go in the strip. With one
  * implant, which is the usual case, it is the only one. */
 const busiest = () =>
   model.cadence.slice().sort((a, b) => b.connections - a.connections)[0];
 
-function renderHero() {
+function renderStrip() {
   if (!model.knob) return;
   const held = model.knob.held;
   const best = busiest();
-
-  el("hero-cv").textContent =
-    best && best.cv !== null ? best.cv.toFixed(3) : "—";
 
   el("shape-line").textContent = held
     ? "One held connection. A proxy logs a single CONNECT and a byte count."
@@ -108,7 +109,7 @@ function renderHero() {
    * the setting alone would produce. Saying only the prediction would hide
    * exactly that. */
   let why = held
-    ? "No cadence here for a periodicity detection to find — a result worth having, not a failed run. Run the other position too; the pair is the finding."
+    ? "No cadence for a periodicity detection to find — a result worth having, not a failed run. Run the other position too; the pair is the finding."
     : "The server never sends a keep-alive, so the client's read times out and it builds a new connection.";
   if (best && best.cv !== null) {
     why += ` Measured on ${best.host}: ${best.verdict}.`;
@@ -117,6 +118,15 @@ function renderHero() {
     }
   }
   el("shape-why").textContent = why;
+
+  el("m-cv").textContent = best && best.cv !== null ? best.cv.toFixed(3) : "—";
+  el("m-mean").textContent =
+    best && best.mean !== null ? `${best.mean}s` : "—";
+  el("m-mean").title = best && best.stdev !== null
+    ? `standard deviation ± ${best.stdev} s` : "";
+  el("m-conns").textContent = model.totals.connections || 0;
+  el("m-ka").textContent = model.totals.keepalives || 0;
+  el("m-sessions").textContent = model.sessions.length;
 
   const positions = [...document.querySelectorAll(".switch .pos")];
   positions.forEach((button) => {
@@ -132,41 +142,11 @@ function renderHero() {
   field.placeholder = custom ? `${model.knob.keepalive} s` : "s";
 
   if (model.server) {
-    el("cmdline").textContent =
-      `server.py --port ${model.server.command_port}` +
-      ` --socks ${model.server.socks_port}` +
-      ` --keepalive ${model.knob.keepalive}` +
-      ` --dashboard ${location.port || 8787}`;
+    el("fact-command").textContent = `0.0.0.0:${model.server.command_port}`;
+    el("fact-socks").textContent = `127.0.0.1:${model.server.socks_port}` +
+      (model.server.socks_auth ? " auth" : "");
+    el("fact-uptime").textContent = duration(model.server.uptime_seconds);
   }
-}
-
-function renderTicker() {
-  const best = busiest();
-  const totals = model.totals;
-
-  el("m-conns").textContent = totals.connections || 0;
-  el("m-conns-d").textContent = totals.deaths
-    ? `${totals.deaths} ended, ${model.clients.length} open`
-    : "none have ended yet";
-
-  el("m-mean").textContent =
-    best && best.mean !== null ? `${best.mean} s` : "—";
-  el("m-mean-d").textContent = best && best.stdev !== null
-    ? `± ${best.stdev} s standard deviation`
-    : "needs two gaps";
-
-  el("m-fleet").textContent = model.clients.length;
-  el("m-fleet-d").textContent = model.clients.length
-    ? model.clients.map((c) => c.host).join(", ")
-    : "no command channel open";
-
-  el("m-sessions").textContent = model.sessions.length;
-  el("m-sessions-d").textContent = totals.sessions
-    ? `${totals.sessions} opened so far, one port each`
-    : "one five-digit port each";
-  el("m-ka").textContent = totals.keepalives || 0;
-  el("m-uptime").textContent =
-    model.server ? duration(model.server.uptime_seconds) : "—";
 }
 
 /* -- fleet and sessions ---------------------------------------------------- */
@@ -174,6 +154,7 @@ function renderTicker() {
 function renderFleet() {
   const body = el("fleet").querySelector("tbody");
   body.textContent = "";
+  el("fleet-count").textContent = model.clients.length;
   el("fleet-empty").classList.toggle("hidden", model.clients.length > 0);
   el("fleet").classList.toggle("hidden", model.clients.length === 0);
 
@@ -200,6 +181,7 @@ function renderFleet() {
 
   const sessions = el("sessions").querySelector("tbody");
   sessions.textContent = "";
+  el("session-count").textContent = model.sessions.length;
   el("session-empty").classList.toggle("hidden", model.sessions.length > 0);
   el("sessions").classList.toggle("hidden", model.sessions.length === 0);
   for (const session of model.sessions) {
@@ -238,6 +220,8 @@ function renderFeed() {
     ? model.events[model.events.length - 1].id : 0;
   if (feed.dataset.newest === String(newest)) return;
   feed.dataset.newest = String(newest);
+  el("feed-count").textContent = model.totals.connections !== undefined
+    ? model.events.length : 0;
   feed.textContent = "";
   for (const entry of model.events.slice(-300).reverse()) {
     const item = document.createElement("li");
@@ -571,8 +555,7 @@ function duration(seconds) {
 }
 
 function renderAll() {
-  renderHero();
-  renderTicker();
+  renderStrip();
   renderFleet();
   renderFeed();
   renderProxyLog();

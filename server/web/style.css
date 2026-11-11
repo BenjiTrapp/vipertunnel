@@ -8,6 +8,9 @@
  *                          screenshot that goes in the finding, where a
  *                          bloom around a number is noise.
  *
+ * The palette and the surface treatment are borrowed; the layout is not. This
+ * is a dense panel to watch a run on, not a report to scroll through.
+ *
  * Fonts come from this server (see fonts/README.md), never a CDN: the page's
  * Content-Security-Policy is default-src 'self', and a measurement host
  * often has no internet at all. */
@@ -46,8 +49,8 @@
 
   --bloom: 1;
   --panel-bg: linear-gradient(180deg, var(--panel2), var(--panel));
-  --notch: polygon(0 0, calc(100% - 18px) 0, 100% 18px,
-                   100% 100%, 18px 100%, 0 calc(100% - 18px));
+  --notch: polygon(0 0, calc(100% - 14px) 0, 100% 14px,
+                   100% 100%, 14px 100%, 0 calc(100% - 14px));
 }
 
 :root[data-theme="report"] {
@@ -78,11 +81,11 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--ink);
-  font: 14px/1.55 "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font: 13px/1.5 "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   overflow-x: hidden;
   background-image:
-    radial-gradient(1200px 600px at 85% -10%, rgba(255, 43, 214, .13), transparent 60%),
-    radial-gradient(900px 500px at -10% 18%, rgba(0, 229, 255, .10), transparent 60%),
+    radial-gradient(1100px 520px at 88% -12%, rgba(255, 43, 214, .12), transparent 60%),
+    radial-gradient(800px 440px at -8% 14%, rgba(0, 229, 255, .09), transparent 60%),
     linear-gradient(var(--grid) 1px, transparent 1px),
     linear-gradient(90deg, var(--grid) 1px, transparent 1px);
   background-size: auto, auto, 40px 40px, 40px 40px;
@@ -90,8 +93,8 @@ body {
 }
 :root[data-theme="report"] body { background-image: none; }
 
-/* The scanline overlay. It is decoration, and it is the first thing to go
- * in the printable theme -- a report does not want a CRT. */
+/* The scanline overlay. Decoration, and the first thing to go in the
+ * printable theme -- a report does not want a CRT. */
 body::after {
   content: "";
   position: fixed;
@@ -103,14 +106,14 @@ body::after {
   opacity: var(--bloom);
 }
 
-.wrap { max-width: 1240px; margin: 0 auto; padding: 26px 16px 70px; }
-h1, h2, h3 { font-weight: 700; margin: 0; }
+.wrap { max-width: 1560px; margin: 0 auto; padding: 0 18px 40px; }
 code { color: var(--rx); }
 b { color: var(--ink); }
 
 .tag {
   display: inline-block;
-  font-size: 11px;
+  font-family: "Orbitron", sans-serif;
+  font-size: 10px;
   letter-spacing: .18em;
   text-transform: uppercase;
   color: var(--acid);
@@ -119,55 +122,58 @@ b { color: var(--ink); }
   clip-path: polygon(0 0, 100% 0, 100% 70%, 92% 100%, 0 100%);
 }
 
-/* -- header ---------------------------------------------------------------- */
+/* -- header bar ------------------------------------------------------------ */
 
-header { padding: 22px 0 6px; }
-h1 {
-  font-family: "Orbitron", "JetBrains Mono", sans-serif;
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 16px 2px 14px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.mark {
+  font-family: "Orbitron", sans-serif;
   font-weight: 900;
-  font-size: clamp(30px, 5.6vw, 62px);
-  line-height: .98;
-  margin: 16px 0 12px;
-  letter-spacing: .02em;
+  font-size: 17px;
+  letter-spacing: .08em;
   text-transform: uppercase;
-}
-.glitch {
-  position: relative;
-  display: inline-block;
   color: var(--ink);
-  text-shadow: 0 0 18px rgba(0, 229, 255, calc(.35 * var(--bloom)));
+  text-shadow: 0 0 calc(16px * var(--bloom)) rgba(0, 229, 255, .4);
 }
-.glitch::before, .glitch::after {
-  content: attr(data-t);
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  opacity: var(--bloom);
+.mark span {
+  font-weight: 400;
+  font-size: 11px;
+  letter-spacing: .2em;
+  color: var(--muted);
+  margin-left: 10px;
+  text-shadow: none;
 }
-.glitch::before {
-  color: var(--tx);
-  transform: translate(2px, 0);
-  clip-path: inset(0 0 62% 0);
-  animation: g1 3.2s infinite steps(1);
-}
-.glitch::after {
-  color: var(--rx);
-  transform: translate(-2px, 0);
-  clip-path: inset(58% 0 0 0);
-  animation: g2 2.7s infinite steps(1);
-}
-@keyframes g1 { 0%,88%,100% { transform: translate(0) } 90% { transform: translate(4px,-1px) } 94% { transform: translate(-3px,1px) } }
-@keyframes g2 { 0%,84%,100% { transform: translate(0) } 86% { transform: translate(-4px,1px) } 91% { transform: translate(3px,0) } }
 
-.sub { color: var(--ink2); max-width: 78ch; margin: 0; }
-.prompt { color: var(--muted); font-size: 13px; margin-top: 14px; }
-.prompt .c { color: var(--acid); }
-.blink { animation: bl 1s steps(1) infinite; }
-@keyframes bl { 50% { opacity: 0 } }
-
-@media (prefers-reduced-motion: reduce) {
-  .glitch::before, .glitch::after, .blink { animation: none !important; }
+.facts { display: flex; gap: 20px; margin: 0; flex: 1; flex-wrap: wrap; }
+.facts dt, .facts dd { display: inline-block; }
+.facts dt {
+  font-family: "Orbitron", sans-serif;
+  font-size: 9px;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
+.facts dd { margin: 0 0 0 7px; color: var(--ink2); }
+.facts .up { color: var(--acid); }
+.facts .down { color: var(--warn); }
+
+.ghost {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink2);
+  padding: 5px 12px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.ghost:hover { border-color: var(--acid); color: var(--acid); }
 
 /* -- panels ---------------------------------------------------------------- */
 
@@ -175,18 +181,19 @@ h1 {
   background: var(--panel-bg);
   border: 1px solid var(--line);
   position: relative;
-  padding: 20px;
+  padding: 14px 16px 16px;
+  margin-bottom: 16px;
   clip-path: var(--notch);
   min-width: 0;
 }
-/* The accent bar in the top-left corner is how a panel says which of the
- * five meanings it belongs to, without spending a word on it. */
+/* The accent bar in the corner is how a panel says which of the five
+ * meanings it belongs to, without spending a word on it. */
 .panel::before {
   content: "";
   position: absolute;
   left: 0;
   top: 0;
-  width: 60px;
+  width: 54px;
   height: 2px;
   background: var(--rx);
   box-shadow: 0 0 calc(12px * var(--bloom)) var(--rx);
@@ -194,91 +201,61 @@ h1 {
 .panel.m::before { background: var(--tx); box-shadow: 0 0 calc(12px * var(--bloom)) var(--tx); }
 .panel.a::before { background: var(--acid); box-shadow: 0 0 calc(12px * var(--bloom)) var(--acid); }
 
-.lbl {
-  font-size: 11px;
+.panel-head { display: flex; align-items: center; gap: 14px; margin-bottom: 10px; flex-wrap: wrap; }
+.panel-head.sub { margin-top: 22px; }
+.panel-head h2, .lbl {
+  font-family: "Orbitron", sans-serif;
+  font-size: 10px;
+  font-weight: 500;
   letter-spacing: .16em;
   text-transform: uppercase;
   color: var(--muted);
+  margin: 0;
 }
-.d { font-size: 12.5px; color: var(--ink2); margin: 4px 0 0; }
-.empty { color: var(--muted); font-style: italic; margin: 10px 0 0; max-width: 70ch; }
-.lead { color: var(--ink2); max-width: 86ch; margin: 0 0 16px; }
+.count {
+  border: 1px solid var(--line);
+  background: var(--panel2);
+  padding: 0 8px;
+  color: var(--ink2);
+  font-size: 11px;
+}
+.d { font-size: 12px; color: var(--ink2); margin: 0 0 10px; max-width: 80ch; }
+.empty { color: var(--muted); font-style: italic; margin: 8px 0 0; max-width: 70ch; font-size: 12px; }
 .hidden { display: none; }
 
-h2 {
-  font-family: "Orbitron", "JetBrains Mono", sans-serif;
-  font-size: clamp(17px, 2.4vw, 23px);
-  letter-spacing: .08em;
-  text-transform: uppercase;
-  margin: 52px 0 8px;
-  display: flex;
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+@media (max-width: 1080px) { .two { grid-template-columns: 1fr; } }
+
+/* -- the strip ------------------------------------------------------------- */
+
+.strip {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 26px;
   align-items: center;
-  gap: 12px;
 }
-h2 .n { color: var(--acid); font-size: .8em; }
-h2::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, var(--line), transparent); }
+@media (max-width: 1240px) { .strip { grid-template-columns: 1fr; } }
 
-/* -- hero ------------------------------------------------------------------ */
-
-.hero { display: grid; grid-template-columns: 1.15fr 1fr; gap: 16px; margin: 28px 0 0; }
-@media (max-width: 900px) { .hero { grid-template-columns: 1fr; } }
-
-/* The number the whole page exists to produce. A coefficient of variation
- * near zero is a machine on a timer; anything else is not a cadence.
- *
- * Deliberately NOT in the display face: Orbitron slashes its zero, so
- * "0.020" reads as "Ø.Ø2Ø". A headline can afford that character; a measured
- * value that gets quoted in a finding cannot. Orbitron carries the titles,
- * the mono carries every digit. */
-.big {
-  font-family: "JetBrains Mono", ui-monospace, monospace;
-  font-weight: 800;
-  font-size: clamp(50px, 9.5vw, 108px);
-  line-height: .95;
-  letter-spacing: -.02em;
-  margin: 12px 0 2px;
-  background: linear-gradient(90deg, var(--rx), #9b8cff 55%, var(--tx));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  filter: drop-shadow(0 0 calc(22px * var(--bloom)) rgba(0, 229, 255, .25));
-}
-.shape-line { margin: 16px 0 0; font-size: 15px; color: var(--ink); }
-
-.ticker { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.ticker .panel { padding: 14px 16px; }
-@media (max-width: 420px) { .ticker { grid-template-columns: 1fr; } }
-.v {
-  font-family: "JetBrains Mono", ui-monospace, monospace;
-  font-weight: 800;
-  font-size: clamp(20px, 2.8vw, 28px);
-  line-height: 1.15;
-  margin-top: 5px;
-}
-.v.rx { color: var(--rx); text-shadow: 0 0 calc(14px * var(--bloom)) rgba(0, 229, 255, .45); }
-.v.tx { color: var(--tx); text-shadow: 0 0 calc(14px * var(--bloom)) rgba(255, 43, 214, .45); }
-.v.ac { color: var(--acid); text-shadow: 0 0 calc(14px * var(--bloom)) rgba(212, 255, 0, .35); }
-.v.dead { color: var(--dead); }
-
-/* -- the knob -------------------------------------------------------------- */
+.knob { display: flex; flex-direction: column; gap: 8px; }
 
 /* A two-position switch and not a slider: the effect is a step, and every
  * value from 1 to 119 seconds produces the same held connection. */
-.switch { display: flex; gap: 8px; flex-wrap: wrap; margin: 18px 0 0; }
+.switch { display: flex; gap: 7px; flex-wrap: wrap; }
 .switch .pos {
   background: var(--panel2);
   border: 1px solid var(--line);
   color: var(--ink2);
   font: inherit;
-  padding: 9px 16px;
+  padding: 7px 14px;
   cursor: pointer;
   text-align: left;
-  clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px));
+  clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px));
 }
 .switch .pos em {
   display: block;
   font-style: normal;
-  font-size: 10px;
+  font-family: "Orbitron", sans-serif;
+  font-size: 9px;
   letter-spacing: .14em;
   text-transform: uppercase;
   color: var(--muted);
@@ -292,7 +269,7 @@ h2::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg
 }
 .switch .pos.on em { color: #07080f; opacity: .7; }
 .custom { display: flex; gap: 6px; align-items: center; }
-.custom input { width: 72px; }
+.custom input { width: 66px; }
 .custom.on input {
   border-color: var(--acid);
   color: var(--acid);
@@ -300,25 +277,33 @@ h2::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg
 }
 .custom.on input::placeholder { color: var(--acid); opacity: 1; }
 
-.ghost {
-  background: transparent;
-  border: 1px solid var(--line);
-  color: var(--ink2);
-  padding: 6px 12px;
-  cursor: pointer;
-  font: inherit;
+.shape-line { margin: 0 0 4px; font-size: 14px; color: var(--ink); }
+.shape .d { margin: 0; }
+
+.metrics { display: flex; gap: 22px; }
+@media (max-width: 1240px) { .metrics { flex-wrap: wrap; } }
+.metric { text-align: right; min-width: 70px; }
+/* Digits are deliberately NOT in the display face: Orbitron slashes its
+ * zero, so 0.020 reads as three slashed noughts. A title can afford that
+ * character; a value that gets quoted in a finding cannot. */
+.v {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-weight: 800;
+  font-size: 26px;
+  line-height: 1.15;
+  margin-top: 3px;
+  letter-spacing: -.01em;
 }
-.ghost:hover { border-color: var(--acid); color: var(--acid); }
-.theme-btn { position: fixed; right: 16px; top: 16px; z-index: 60; background: var(--panel); }
+.metric .lbl { font-size: 9px; }
+.v.rx { color: var(--rx); text-shadow: 0 0 calc(14px * var(--bloom)) rgba(0, 229, 255, .45); }
+.v.tx { color: var(--tx); text-shadow: 0 0 calc(14px * var(--bloom)) rgba(255, 43, 214, .45); }
+.v.ac { color: var(--acid); text-shadow: 0 0 calc(14px * var(--bloom)) rgba(212, 255, 0, .4); font-size: 32px; }
+.v.warn { color: var(--warn); }
 
-/* -- charts ---------------------------------------------------------------- */
+/* -- timeline -------------------------------------------------------------- */
 
-.two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
-@media (max-width: 980px) { .two { grid-template-columns: 1fr; } }
-
-.chart-head { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin: 0 4px 10px; }
-.legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12.5px; color: var(--ink2); }
-.sw { display: inline-block; width: 10px; height: 10px; margin-right: 6px; }
+.legend { display: flex; gap: 15px; flex-wrap: wrap; font-size: 11.5px; color: var(--ink2); }
+.sw { display: inline-block; width: 10px; height: 9px; margin-right: 6px; }
 .zoom { display: flex; margin-left: auto; }
 .zoom button {
   background: var(--panel2);
@@ -326,7 +311,7 @@ h2::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg
   border-right-width: 0;
   color: var(--ink2);
   font: inherit;
-  font-size: 12px;
+  font-size: 11px;
   padding: 3px 10px;
   cursor: pointer;
 }
@@ -335,11 +320,11 @@ h2::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg
 
 .chart { position: relative; width: 100%; }
 .chart svg { display: block; width: 100%; height: auto; overflow: visible; }
-.chart .ax text { fill: var(--muted); font: 11px "JetBrains Mono", monospace; }
+.chart .ax text { fill: var(--muted); font: 10px "JetBrains Mono", monospace; }
 .chart .ax line { stroke: var(--grid); }
 .chart .lane-label { fill: var(--ink2); font: 11px "JetBrains Mono", monospace; }
 .chart .lane-bg { fill: var(--grid); opacity: .35; }
-.chart .gap-label { fill: var(--acid); font: 11px "JetBrains Mono", monospace; }
+.chart .gap-label { fill: var(--acid); font: 10px "JetBrains Mono", monospace; }
 .chart .hl { fill: var(--ink); opacity: 0; }
 
 /* The hover card. An SVG <title> would have worked and would have taken a
@@ -350,7 +335,7 @@ h2::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg
   background: var(--panel);
   border: 1px solid var(--rx);
   padding: 8px 10px;
-  font-size: 12px;
+  font-size: 11.5px;
   min-width: 170px;
   opacity: 0;
   transition: opacity .08s;
@@ -365,18 +350,19 @@ h2::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg
 
 /* -- tables ---------------------------------------------------------------- */
 
-.grid-t { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+.grid-t { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .grid-t th {
   text-align: left;
+  font-family: "Orbitron", sans-serif;
   font-weight: 400;
-  font-size: 10px;
+  font-size: 9px;
   letter-spacing: .12em;
   text-transform: uppercase;
   color: var(--muted);
   border-bottom: 1px solid var(--line);
   padding: 0 8px 6px 0;
 }
-.grid-t td { padding: 7px 8px 7px 0; border-bottom: 1px solid var(--grid); color: var(--ink2); }
+.grid-t td { padding: 6px 8px 6px 0; border-bottom: 1px solid var(--grid); color: var(--ink2); }
 .grid-t td:first-child { color: var(--ink); }
 .grid-t tr:last-child td { border-bottom: 0; }
 .grid-t .danger {
@@ -384,7 +370,7 @@ h2::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg
   border: 1px solid var(--line);
   color: var(--muted);
   font: inherit;
-  font-size: 12px;
+  font-size: 11px;
   padding: 2px 9px;
   cursor: pointer;
 }
@@ -392,11 +378,11 @@ h2::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg
 
 /* -- feed ------------------------------------------------------------------ */
 
-.feed { list-style: none; margin: 10px 0 0; padding: 0; max-height: 440px; overflow-y: auto; overflow-x: hidden; font-size: 12.5px; }
+.feed { list-style: none; margin: 0; padding: 0; max-height: 330px; overflow-y: auto; overflow-x: hidden; font-size: 12px; }
 .feed li {
   display: flex;
   gap: 10px;
-  padding: 4px 0;
+  padding: 3px 0;
   border-bottom: 1px solid var(--grid);
   white-space: nowrap;
   min-width: 0;
@@ -414,46 +400,46 @@ h2::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg
 
 .proxylog {
   margin: 0;
-  max-height: 400px;
+  max-height: 330px;
   overflow: auto;
   color: var(--ink2);
   background: var(--bg);
   border: 1px solid var(--line);
-  padding: 10px 12px;
-  font-size: 12px;
+  padding: 9px 11px;
+  font-size: 11.5px;
   line-height: 1.6;
 }
 
 /* -- forms ----------------------------------------------------------------- */
 
-form { display: flex; gap: 8px; flex-wrap: wrap; }
+form { display: flex; gap: 7px; flex-wrap: wrap; }
 input {
   background: var(--panel2);
   border: 1px solid var(--line);
   color: var(--ink);
   font: inherit;
-  font-size: 13px;
-  padding: 7px 9px;
+  font-size: 12.5px;
+  padding: 6px 9px;
   min-width: 0;
   flex: 1;
 }
 :root[data-theme="report"] input { background: var(--bg); }
 input:focus { outline: 0; border-color: var(--rx); box-shadow: 0 0 calc(12px * var(--bloom)) rgba(0, 229, 255, .3); }
-input[type="number"] { flex: 0 0 96px; }
+input[type="number"] { flex: 0 0 90px; }
 form button[type="submit"] {
   background: var(--rx);
   border: 0;
   color: #07080f;
-  font: inherit;
-  padding: 7px 18px;
+  font-family: "Orbitron", sans-serif;
+  font-size: 11px;
+  padding: 6px 16px;
   cursor: pointer;
   flex: 0 0 auto;
-  letter-spacing: .08em;
+  letter-spacing: .1em;
   text-transform: uppercase;
-  font-size: 12px;
-  clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px));
+  clip-path: polygon(0 0, calc(100% - 7px) 0, 100% 7px, 100% 100%, 7px 100%, 0 calc(100% - 7px));
 }
-output { display: block; margin-top: 12px; color: var(--ink2); font-size: 12.5px; }
+output { display: block; margin-top: 10px; color: var(--ink2); font-size: 12px; }
 output .ok { color: var(--acid); }
 output .bad { color: var(--dead); }
 output pre {
@@ -461,24 +447,21 @@ output pre {
   border: 1px solid var(--line);
   padding: 8px 10px;
   margin: 8px 0 0;
-  max-height: 170px;
+  max-height: 150px;
   overflow: auto;
   white-space: pre-wrap;
-  font-size: 12px;
+  font-size: 11.5px;
 }
 
 footer {
-  margin-top: 60px;
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: 11.5px;
   border-top: 1px dashed var(--line);
-  padding-top: 18px;
-  max-width: 100ch;
+  padding-top: 14px;
+  max-width: 110ch;
 }
-footer p { margin: 10px 0 0; }
 
 @media print {
-  body::after, .theme-btn, .switch, #probe, #note, .zoom, .prompt { display: none; }
+  body::after, #theme, .switch, #probe, #note, .zoom { display: none; }
   .panel { break-inside: avoid; }
-  h2 { margin-top: 26px; }
 }

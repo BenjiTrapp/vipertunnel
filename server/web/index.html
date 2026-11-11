@@ -9,22 +9,22 @@
 <body>
 <div class="wrap">
 
-<header>
-  <span class="tag">// wire-faithful emulation · loopback only · out of band</span>
-  <h1><span class="glitch" data-t="The ledger does not lie">The ledger does not lie</span></h1>
-  <p class="sub">A detection reports what it saw. This reports what
-  <b>happened</b> — every connection, keep-alive and relay the tunnel
-  actually made, and the jitter a periodicity rule would compute from them.
-  Compare an alert against this, not against its own timestamps.</p>
-  <div class="prompt">
-    <span class="c">$</span> <span id="cmdline">server.py --port 443 --keepalive 0 --dashboard 8787</span><span class="blink">▮</span>
-  </div>
+<header class="bar">
+  <div class="mark">vipertunnel<span>// operator</span></div>
+  <span class="tag">loopback · out of band</span>
+  <dl class="facts">
+    <dt>command</dt><dd id="fact-command">—</dd>
+    <dt>operator</dt><dd id="fact-socks">—</dd>
+    <dt>up</dt><dd id="fact-uptime">—</dd>
+    <dt>feed</dt><dd id="fact-feed" class="down">connecting</dd>
+  </dl>
+  <button id="theme" class="ghost" title="Grid / Report">theme</button>
 </header>
 
-<section class="hero">
-  <div class="panel a">
-    <div class="lbl">Cadence · coefficient of variation</div>
-    <div class="big" id="hero-cv">—</div>
+<!-- The strip: the knob, what it predicts, and what was measured. -->
+<section class="strip panel a" id="strip">
+  <div class="knob">
+    <div class="lbl">keep-alive</div>
     <div class="switch" role="group" aria-label="keep-alive">
       <button data-seconds="60" class="pos">60 s<em>held</em></button>
       <button data-seconds="0" class="pos">0<em>cadence</em></button>
@@ -33,27 +33,23 @@
         <button id="knob-set" class="ghost">set</button>
       </label>
     </div>
+  </div>
+  <div class="shape">
     <p class="shape-line" id="shape-line">waiting for the server</p>
     <p class="d" id="shape-why"></p>
   </div>
-  <div class="ticker">
-    <div class="panel"><div class="lbl">Command connections</div><div class="v rx" id="m-conns">0</div><div class="d" id="m-conns-d">none yet</div></div>
-    <div class="panel"><div class="lbl">Mean gap</div><div class="v rx" id="m-mean">—</div><div class="d" id="m-mean-d">needs two gaps</div></div>
-    <div class="panel m"><div class="lbl">Implants connected</div><div class="v tx" id="m-fleet">0</div><div class="d" id="m-fleet-d">no command channel open</div></div>
-    <div class="panel m"><div class="lbl">Relays carrying</div><div class="v tx" id="m-sessions">0</div><div class="d" id="m-sessions-d">one five-digit port each</div></div>
-    <div class="panel a"><div class="lbl">Keep-alives sent</div><div class="v ac" id="m-ka">0</div><div class="d">the 00 00 fingerprint</div></div>
-    <div class="panel a"><div class="lbl">Server up</div><div class="v ac" id="m-uptime">—</div><div class="d" id="m-feed">feed: connecting</div></div>
+  <div class="metrics">
+    <div class="metric"><div class="lbl">cv · jitter</div><div class="v ac" id="m-cv">—</div></div>
+    <div class="metric"><div class="lbl">mean gap</div><div class="v rx" id="m-mean">—</div></div>
+    <div class="metric"><div class="lbl">connections</div><div class="v rx" id="m-conns">0</div></div>
+    <div class="metric"><div class="lbl">keep-alives</div><div class="v warn" id="m-ka">0</div></div>
+    <div class="metric"><div class="lbl">relays</div><div class="v tx" id="m-sessions">0</div></div>
   </div>
 </section>
 
-<h2><span class="n">01</span>Every connection, on one axis</h2>
-<p class="lead">One lane per implant host. A bar is a command connection,
-  amber ticks inside it are keep-alives, red marks are deaths, and the band
-  underneath is a relay session carrying traffic. A gap is labelled only
-  where the rhythm changes — so a run with one label is a run with one
-  cadence.</p>
-<div class="panel" style="padding:18px 14px 10px">
-  <div class="chart-head">
+<section class="panel">
+  <div class="panel-head">
+    <h2>timeline</h2>
     <div class="legend">
       <span><i class="sw" style="background:var(--rx)"></i>command connection</span>
       <span><i class="sw" style="background:var(--warn)"></i>keep-alive</span>
@@ -74,57 +70,46 @@
     first command connection appears here as a bar. One that keeps growing
     is the held shape; bars that repeat are the cadence.
   </p>
-</div>
+</section>
 
-<h2><span class="n">02</span>What happened, and what a detection gets</h2>
-<p class="lead">Left: the ledger, live. Right: the same run as a forward
-  proxy would have written it. The difference between the two panes is the
-  reason this repository exists.</p>
+<!-- Side by side on purpose: the left pane holds everything that happened,
+     the right pane holds everything a detection gets. -->
 <div class="two">
-  <div class="panel" style="padding:18px 16px 14px">
-    <div class="lbl">Ledger · live</div>
+  <section class="panel">
+    <div class="panel-head"><h2>ledger · live</h2><span class="count" id="feed-count">0</span></div>
     <ol class="feed" id="feed"></ol>
-  </div>
-  <div class="panel m" style="padding:18px 16px 14px">
-    <div class="lbl">Reconstructed proxy log</div>
-    <p class="d" style="margin:8px 0 10px">Only facts this server holds. It
-      does not know the hostname the implant dialled or the bytes a proxy
-      counted, so those stay <code>?</code> rather than being invented.</p>
+  </section>
+  <section class="panel m">
+    <div class="panel-head"><h2>what a proxy log shows</h2></div>
     <pre class="proxylog" id="proxylog"></pre>
-  </div>
+  </section>
 </div>
 
-<h2><span class="n">03</span>The fleet</h2>
 <div class="two">
-  <div class="panel" style="padding:18px 16px 14px">
-    <div class="lbl">Implants with a command connection open</div>
+  <section class="panel">
+    <div class="panel-head"><h2>fleet</h2><span class="count" id="fleet-count">0</span></div>
     <table class="grid-t" id="fleet">
       <thead><tr><th>implant</th><th>held</th><th>k/a</th><th>sess</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
     <p class="empty" id="fleet-empty">No implant has a command connection open.</p>
-  </div>
-  <div class="panel m" style="padding:18px 16px 14px">
-    <div class="lbl">Relay sessions carrying traffic</div>
+
+    <div class="panel-head sub"><h2>relay sessions</h2><span class="count" id="session-count">0</span></div>
     <table class="grid-t" id="sessions">
       <thead><tr><th>target</th><th>relay</th><th>via</th><th>age</th></tr></thead>
       <tbody></tbody>
     </table>
     <p class="empty" id="session-empty">
       No relay is carrying traffic. Drive one with <code>curl --socks5</code>
-      on the operator port, or probe it below.
+      on the operator port, or probe it here.
     </p>
-  </div>
-</div>
+  </section>
 
-<h2><span class="n">04</span>Reach into the run</h2>
-<div class="two">
-  <div class="panel a" style="padding:18px 16px 14px">
-    <div class="lbl">Probe through the tunnel</div>
-    <p class="d" style="margin:8px 0 12px">Speaks RFC 1928 to this server's
-      own operator port, exactly as <code>curl --socks5</code> would, so a
-      probe that works proves the whole path. Capped at 1 KiB out and 4 KiB
-      back: a check, not a transfer tool.</p>
+  <section class="panel a">
+    <div class="panel-head"><h2>probe through the tunnel</h2></div>
+    <p class="d">Speaks RFC 1928 to this server's own operator port, exactly
+      as <code>curl --socks5</code> would, so a probe that works proves the
+      whole path. Capped at 1 KiB out and 4 KiB back.</p>
     <form id="probe">
       <input name="host" placeholder="host, as the implant sees it" required>
       <input name="port" type="number" min="1" max="65535" value="80" required>
@@ -132,37 +117,28 @@
       <button type="submit">probe</button>
     </form>
     <output id="probe-out"></output>
-  </div>
-  <div class="panel a" style="padding:18px 16px 14px">
-    <div class="lbl">Mark the ledger</div>
-    <p class="d" style="margin:8px 0 12px">A dated line in the same file as
-      the ground truth — the marker you want at the moment an alert
-      fires.</p>
+
+    <div class="panel-head sub"><h2>mark the ledger</h2></div>
+    <p class="d">A dated line in the same file as the ground truth — the
+      marker you want at the moment an alert fires.</p>
     <form id="note">
       <input name="text" placeholder="e.g. SIEM alert 4411 fired" required>
       <button type="submit">write</button>
     </form>
     <output id="note-out"></output>
-  </div>
+  </section>
 </div>
 
 <footer>
-  <span class="tag" style="margin-bottom:10px">// provenance of these numbers</span>
-  <p>Every value on this page is derived from events that were written to the
-  ledger file as well; the file stays the artefact a finding cites. The
-  cadence is the mean, standard deviation and coefficient of variation over
-  the gaps between <code>client-connected</code> events from one host — the
-  arithmetic a beaconing detection runs. Fewer than two gaps is not a
-  cadence and is reported as such rather than as a mean over one number.</p>
-  <p>This view is <b>out of band</b>: a listening HTTP port is a trait this
-  family does not have, so a scan of this host taken with the dashboard up
-  reports the tool rather than the thing being emulated. It binds loopback
-  only; reach it over an SSH forward. Fonts are served from this server, not
-  a CDN — see <code>server/web/fonts/README.md</code>.</p>
+  Every value here comes from events that went to the ledger file as well;
+  the file stays the artefact a finding cites. The cadence is the mean,
+  standard deviation and coefficient of variation over the gaps between
+  <code>client-connected</code> events from one host — the arithmetic a
+  beaconing detection runs. A listening HTTP port is a trait this family does
+  not have, so this binds loopback only: reach it over an SSH forward.
 </footer>
 
 </div>
-<button id="theme" class="ghost theme-btn" title="Grid / Report">theme</button>
 <script src="/app.js"></script>
 </body>
 </html>
